@@ -1,0 +1,101 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: platform
+
+resources:
+  - ../../base
+
+commonLabels:
+  environment: prod
+
+# Image configuration for prod
+images:
+  - name: sentinel-api
+    newName: gcr.io/PROJECT_ID/sentinel-api
+    # Use specific version tags in production, not 'latest'
+    newTag: v1.0.0
+
+# Patches for prod environment
+patches:
+  # Increase replicas for prod
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: sentinel-api
+        namespace: platform
+      spec:
+        replicas: 3
+  # Higher HPA for prod
+  - patch: |-
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: sentinel-api
+        namespace: platform
+      spec:
+        minReplicas: 3
+        maxReplicas: 20
+  # Production resources
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: sentinel-api
+        namespace: platform
+      spec:
+        template:
+          spec:
+            containers:
+              - name: sentinel-api
+                resources:
+                  requests:
+                    cpu: 500m
+                    memory: 512Mi
+                  limits:
+                    cpu: "1"
+                    memory: 1Gi
+  # Higher PDB for prod
+  - patch: |-
+      apiVersion: policy/v1
+      kind: PodDisruptionBudget
+      metadata:
+        name: sentinel-api
+        namespace: platform
+      spec:
+        minAvailable: 2
+  # Update ServiceAccount annotation for prod
+  - patch: |-
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: sentinel-api
+        namespace: platform
+        annotations:
+          iam.gke.io/gcp-service-account: sentinel-api-prod@PROJECT_ID.iam.gserviceaccount.com
+
+# ConfigMap patches for prod
+configMapGenerator:
+  - name: sentinel-api-config
+    namespace: platform
+    behavior: merge
+    literals:
+      - ENVIRONMENT=prod
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+      - MODELS_BUCKET=sentinel-models-prod-PROJECT_ID
+      - MODELS_PATH=gs://sentinel-models-prod-PROJECT_ID/
+      - ENABLE_METRICS=true
+      - WORKERS=4
+
+# In production, use External Secrets Operator or GCP Secret Manager CSI driver
+# This is a placeholder - DO NOT use in actual production
+secretGenerator:
+  - name: sentinel-api-secrets
+    namespace: platform
+    options:
+      disableNameSuffixHash: true
+    literals:
+      - jwt-secret=PLACEHOLDER_USE_EXTERNAL_SECRETS
+      - api-key=PLACEHOLDER_USE_EXTERNAL_SECRETS

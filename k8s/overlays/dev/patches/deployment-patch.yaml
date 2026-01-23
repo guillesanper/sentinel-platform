@@ -1,0 +1,18 @@
+# Additional deployment patches for dev environment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sentinel-api
+  namespace: platform
+spec:
+  template:
+    metadata:
+      annotations:
+        # Enable debug logging via annotation
+        sentinel.io/debug: "true"
+    spec:
+      containers:
+        - name: sentinel-api
+          env:
+            - name: DEBUG
+              value: "true"

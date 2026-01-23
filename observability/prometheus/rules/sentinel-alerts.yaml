@@ -1,0 +1,147 @@
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: sentinel-alerts
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: sentinel-api
+    app.kubernetes.io/component: alerting
+    app.kubernetes.io/part-of: sentinel
+    prometheus: sentinel-prometheus
+    role: alert-rules
+spec:
+  groups:
+    - name: sentinel-api-alerts
+      interval: 30s
+      rules:
+        # High Error Rate Alert
+        - alert: SentinelHighErrorRate
+          expr: |
+            (
+              sum(rate(sentinel_request_total{status=~"5.."}[5m])) by (service)
+              /
+              sum(rate(sentinel_request_total[5m])) by (service)
+            ) > 0.05
+          for: 5m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: "High error rate detected for {{ $labels.service }}"
+            description: "Error rate is {{ $value | humanizePercentage }} (threshold: 5%) for service {{ $labels.service }}"
+            runbook_url: "https://wiki.example.com/runbooks/sentinel-high-error-rate"
+
+        # High Latency Alert
+        - alert: SentinelHighLatency
+          expr: |
+            histogram_quantile(0.99,
+              sum(rate(sentinel_request_duration_seconds_bucket[5m])) by (le, service)
+            ) > 0.5
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "High p99 latency detected for {{ $labels.service }}"
+            description: "P99 latency is {{ $value | humanizeDuration }} (threshold: 500ms) for service {{ $labels.service }}"
+            runbook_url: "https://wiki.example.com/runbooks/sentinel-high-latency"
+
+        # Model Not Ready Alert
+        - alert: SentinelModelNotReady
+          expr: |
+            up{job="sentinel-api"} == 0
+            or
+            probe_success{job="sentinel-api-blackbox", probe="readiness"} == 0
+          for: 2m
+          labels:
+            severity: critical
+            team: ml
+          annotations:
+            summary: "Sentinel API model is not ready"
+            description: "The /ready endpoint has been failing for more than 2 minutes on {{ $labels.instance }}"
+            runbook_url: "https://wiki.example.com/runbooks/sentinel-model-not-ready"
+
+        # High Threat Score Alert
+        - alert: SentinelHighThreatScore
+          expr: |
+            sum(rate(sentinel_prediction_score{severity="critical"}[5m])) by (service) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+            team: security
+          annotations:
+            summary: "High threat score detections increasing"
+            description: "Critical threat score predictions rate is {{ $value }}/s for service {{ $labels.service }}"
+            runbook_url: "https://wiki.example.com/runbooks/sentinel-high-threat"
+
+        # Pod Not Ready Alert
+        - alert: SentinelPodNotReady
+          expr: |
+            kube_pod_status_ready{namespace="platform", pod=~"sentinel-.*", condition="true"} == 0
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "Sentinel pod {{ $labels.pod }} is not ready"
+            description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has been not ready for more than 5 minutes"
+            runbook_url: "https://wiki.example.com/runbooks/sentinel-pod-not-ready"
+
+        # No Replicas Available
+        - alert: SentinelNoReplicasAvailable
+          expr: |
+            kube_deployment_status_replicas_available{namespace="platform", deployment="sentinel-api"} == 0
+          for: 1m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: "No Sentinel API replicas available"
+            description: "Deployment {{ $labels.deployment }} in namespace {{ $labels.namespace }} has no available replicas"
+            runbook_url: "https://wiki.example.com/runbooks/sentinel-no-replicas"
+
+        # High CPU Usage
+        - alert: SentinelHighCPUUsage
+          expr: |
+            (
+              sum(rate(container_cpu_usage_seconds_total{namespace="platform", pod=~"sentinel-.*"}[5m])) by (pod)
+              /
+              sum(kube_pod_container_resource_limits{namespace="platform", pod=~"sentinel-.*", resource="cpu"}) by (pod)
+            ) > 0.9
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "High CPU usage for Sentinel pod {{ $labels.pod }}"
+            description: "CPU usage is {{ $value | humanizePercentage }} of limit for pod {{ $labels.pod }}"
+
+        # High Memory Usage
+        - alert: SentinelHighMemoryUsage
+          expr: |
+            (
+              sum(container_memory_working_set_bytes{namespace="platform", pod=~"sentinel-.*"}) by (pod)
+              /
+              sum(kube_pod_container_resource_limits{namespace="platform", pod=~"sentinel-.*", resource="memory"}) by (pod)
+            ) > 0.9
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "High memory usage for Sentinel pod {{ $labels.pod }}"
+            description: "Memory usage is {{ $value | humanizePercentage }} of limit for pod {{ $labels.pod }}"
+
+        # Attack Type Spike
+        - alert: SentinelAttackTypeSpike
+          expr: |
+            sum(increase(sentinel_attack_type_total[10m])) by (attack_type) > 100
+          for: 5m
+          labels:
+            severity: warning
+            team: security
+          annotations:
+            summary: "Spike in {{ $labels.attack_type }} attack detections"
+            description: "Detected {{ $value }} {{ $labels.attack_type }} attacks in the last 10 minutes"
+            runbook_url: "https://wiki.example.com/runbooks/sentinel-attack-spike"
