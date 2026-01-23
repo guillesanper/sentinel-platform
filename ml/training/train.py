@@ -1,0 +1,777 @@
+"""
+Training script for Sentinel ML models.
+
+Trains the anomaly detector (Isolation Forest) and attack classifier (XGBoost)
+using synthetic or real security event data. Integrates with MLflow for
+experiment tracking and model versioning.
+
+Usage:
+    python -m ml.training.train --n-samples 10000 --output-dir models/
+    python -m ml.training.train --data-path data/events.json --output-dir models/
+"""
+
+import json
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import click
+import mlflow
+import numpy as np
+import structlog
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+)
+from sklearn.model_selection import train_test_split
+
+# Add project root to path for imports
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
+
+from ml.features.pipeline import FeatureExtractor
+from ml.models.anomaly_detector import AnomalyDetector
+from ml.models.classifier import AttackClassifier, ATTACK_TYPES, LABEL_TO_IDX
+
+logger = structlog.get_logger()
+
+
+# ============================================================================
+# Data Loading
+# ============================================================================
+
+
+def load_or_generate_data(
+    data_path: str | Path | None = None,
+    n_samples: int = 10000,
+    attack_ratio: float = 0.3,
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """
+    Load data from file or generate synthetic data.
+
+    Args:
+        data_path: Path to JSON file with events. If None, generates synthetic data.
+        n_samples: Number of samples to generate (if data_path is None).
+        attack_ratio: Ratio of attack events in synthetic data.
+        seed: Random seed for reproducibility.
+
+    Returns:
+        Tuple of (X, y, labels) where:
+        - X: Feature matrix of shape (n_samples, n_features)
+        - y: Encoded labels of shape (n_samples,)
+        - labels: String labels list
+
+    Raises:
+        FileNotFoundError: If data_path is specified but file doesn't exist.
+        ValueError: If data file format is invalid.
+    """
+    extractor = FeatureExtractor()
+
+    if data_path is not None:
+        # Load from file
+        data_path = Path(data_path)
+        if not data_path.exists():
+            raise FileNotFoundError(f"Data file not found: {data_path}")
+
+        logger.info("loading_data_from_file", path=str(data_path))
+
+        with open(data_path, "r") as f:
+            data = json.load(f)
+
+        # Expected format: {"events": [...], "labels": [...]}
+        # or just a list of {"event": {...}, "label": "..."}
+        if isinstance(data, dict):
+            events = data.get("events", [])
+            labels = data.get("labels", [])
+        elif isinstance(data, list):
+            events = [item.get("event", item) for item in data]
+            labels = [item.get("label", "normal") for item in data]
+        else:
+            raise ValueError("Invalid data format. Expected dict or list.")
+
+        if len(events) != len(labels):
+            raise ValueError(
+                f"Mismatch: {len(events)} events but {len(labels)} labels"
+            )
+
+        logger.info("data_loaded", n_events=len(events))
+
+    else:
+        # Generate synthetic data
+        logger.info(
+            "generating_synthetic_data",
+            n_samples=n_samples,
+            attack_ratio=attack_ratio,
+            seed=seed,
+        )
+
+        # Import here to avoid circular imports
+        from data.generators.synthetic import generate_dataset
+
+        events, labels = generate_dataset(
+            n_samples=n_samples,
+            attack_ratio=attack_ratio,
+            seed=seed,
+        )
+
+        logger.info("synthetic_data_generated", n_events=len(events))
+
+    # Extract features
+    logger.info("extracting_features", n_events=len(events))
+    X = extractor.transform_batch(events)
+
+    # Encode labels
+    y = np.array([LABEL_TO_IDX.get(label, 0) for label in labels], dtype=np.int32)
+
+    logger.info(
+        "data_prepared",
+        X_shape=X.shape,
+        y_shape=y.shape,
+        n_classes=len(set(labels)),
+    )
+
+    return X, y, labels
+
+
+# ============================================================================
+# Model Training
+# ============================================================================
+
+
+def train_anomaly_detector(
+    X_train: np.ndarray,
+    contamination: float = 0.1,
+    n_estimators: int = 100,
+    random_state: int = 42,
+) -> AnomalyDetector:
+    """
+    Train the anomaly detection model.
+
+    Args:
+        X_train: Training features of shape (n_samples, n_features).
+        contamination: Expected proportion of outliers.
+        n_estimators: Number of trees in the forest.
+        random_state: Random seed for reproducibility.
+
+    Returns:
+        Trained AnomalyDetector instance.
+    """
+    logger.info(
+        "training_anomaly_detector",
+        n_samples=X_train.shape[0],
+        contamination=contamination,
+        n_estimators=n_estimators,
+    )
+
+    detector = AnomalyDetector(
+        contamination=contamination,
+        n_estimators=n_estimators,
+        random_state=random_state,
+    )
+
+    detector.fit(X_train)
+
+    logger.info("anomaly_detector_trained")
+
+    return detector
+
+
+def train_classifier(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray | None = None,
+    y_val: np.ndarray | None = None,
+    n_estimators: int = 100,
+    max_depth: int = 6,
+    learning_rate: float = 0.1,
+    random_state: int = 42,
+) -> AttackClassifier:
+    """
+    Train the attack classification model.
+
+    Args:
+        X_train: Training features of shape (n_samples, n_features).
+        y_train: Training labels of shape (n_samples,).
+        X_val: Optional validation features.
+        y_val: Optional validation labels.
+        n_estimators: Number of boosting rounds.
+        max_depth: Maximum tree depth.
+        learning_rate: Boosting learning rate.
+        random_state: Random seed for reproducibility.
+
+    Returns:
+        Trained AttackClassifier instance.
+    """
+    logger.info(
+        "training_attack_classifier",
+        n_samples=X_train.shape[0],
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+    )
+
+    classifier = AttackClassifier(
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        learning_rate=learning_rate,
+        random_state=random_state,
+    )
+
+    # Set up validation set if provided
+    eval_set = None
+    if X_val is not None and y_val is not None:
+        eval_set = [(X_val, y_val)]
+
+    classifier.fit(X_train, y_train, eval_set=eval_set)
+
+    logger.info("attack_classifier_trained")
+
+    return classifier
+
+
+# ============================================================================
+# Model Evaluation
+# ============================================================================
+
+
+def evaluate_models(
+    detector: AnomalyDetector,
+    classifier: AttackClassifier,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    labels_test: list[str],
+) -> dict[str, Any]:
+    """
+    Evaluate trained models on test data.
+
+    Args:
+        detector: Trained anomaly detector.
+        classifier: Trained attack classifier.
+        X_test: Test features.
+        y_test: Test labels (encoded).
+        labels_test: Test labels (strings).
+
+    Returns:
+        Dictionary with evaluation metrics.
+    """
+    logger.info("evaluating_models", n_test_samples=X_test.shape[0])
+
+    metrics: dict[str, Any] = {}
+
+    # -------------------------------------------------------------------------
+    # Anomaly Detector Evaluation
+    # -------------------------------------------------------------------------
+
+    # For anomaly detection, we consider non-normal as anomaly
+    y_anomaly_true = np.array([1 if label != "normal" else 0 for label in labels_test])
+
+    anomaly_results = []
+    for i in range(len(X_test)):
+        result = detector.predict(X_test[i])
+        anomaly_results.append(1 if result["is_anomaly"] else 0)
+
+    y_anomaly_pred = np.array(anomaly_results)
+
+    # Calculate anomaly detection metrics
+    anomaly_accuracy = accuracy_score(y_anomaly_true, y_anomaly_pred)
+    anomaly_precision = precision_score(y_anomaly_true, y_anomaly_pred, zero_division=0)
+    anomaly_recall = recall_score(y_anomaly_true, y_anomaly_pred, zero_division=0)
+    anomaly_f1 = f1_score(y_anomaly_true, y_anomaly_pred, zero_division=0)
+
+    metrics["anomaly"] = {
+        "accuracy": float(anomaly_accuracy),
+        "precision": float(anomaly_precision),
+        "recall": float(anomaly_recall),
+        "f1": float(anomaly_f1),
+    }
+
+    logger.info(
+        "anomaly_detector_evaluation",
+        accuracy=anomaly_accuracy,
+        precision=anomaly_precision,
+        recall=anomaly_recall,
+        f1=anomaly_f1,
+    )
+
+    # -------------------------------------------------------------------------
+    # Classifier Evaluation
+    # -------------------------------------------------------------------------
+
+    # Get predictions for all test samples
+    y_pred = []
+    for i in range(len(X_test)):
+        result = classifier.predict(X_test[i])
+        y_pred.append(LABEL_TO_IDX.get(result["attack_type"], 0))
+
+    y_pred = np.array(y_pred)
+
+    # Calculate classification metrics
+    class_accuracy = accuracy_score(y_test, y_pred)
+    class_precision = precision_score(y_test, y_pred, average="weighted", zero_division=0)
+    class_recall = recall_score(y_test, y_pred, average="weighted", zero_division=0)
+    class_f1 = f1_score(y_test, y_pred, average="weighted", zero_division=0)
+
+    # Per-class metrics
+    class_report = classification_report(
+        y_test,
+        y_pred,
+        target_names=ATTACK_TYPES,
+        output_dict=True,
+        zero_division=0,
+    )
+
+    # Confusion matrix
+    cm = confusion_matrix(y_test, y_pred)
+
+    metrics["classifier"] = {
+        "accuracy": float(class_accuracy),
+        "precision": float(class_precision),
+        "recall": float(class_recall),
+        "f1": float(class_f1),
+        "classification_report": class_report,
+        "confusion_matrix": cm.tolist(),
+    }
+
+    logger.info(
+        "attack_classifier_evaluation",
+        accuracy=class_accuracy,
+        precision=class_precision,
+        recall=class_recall,
+        f1=class_f1,
+    )
+
+    # -------------------------------------------------------------------------
+    # Per-Attack-Type Metrics
+    # -------------------------------------------------------------------------
+
+    per_attack_metrics = {}
+    for attack_type in ATTACK_TYPES:
+        if attack_type in class_report:
+            per_attack_metrics[attack_type] = {
+                "precision": class_report[attack_type]["precision"],
+                "recall": class_report[attack_type]["recall"],
+                "f1": class_report[attack_type]["f1-score"],
+                "support": class_report[attack_type]["support"],
+            }
+
+    metrics["per_attack_type"] = per_attack_metrics
+
+    return metrics
+
+
+# ============================================================================
+# MLflow Integration
+# ============================================================================
+
+
+def log_to_mlflow(
+    metrics: dict[str, Any],
+    detector: AnomalyDetector,
+    classifier: AttackClassifier,
+    params: dict[str, Any],
+    output_dir: Path,
+) -> str:
+    """
+    Log training results to MLflow.
+
+    Args:
+        metrics: Evaluation metrics dictionary.
+        detector: Trained anomaly detector.
+        classifier: Trained attack classifier.
+        params: Training parameters.
+        output_dir: Directory where models are saved.
+
+    Returns:
+        MLflow run ID.
+    """
+    # Set up MLflow
+    mlflow.set_experiment("sentinel-intrusion-detection")
+
+    with mlflow.start_run() as run:
+        run_id = run.info.run_id
+        logger.info("mlflow_run_started", run_id=run_id)
+
+        # Log parameters
+        mlflow.log_params(params)
+
+        # Log anomaly detector metrics
+        mlflow.log_metric("anomaly_accuracy", metrics["anomaly"]["accuracy"])
+        mlflow.log_metric("anomaly_precision", metrics["anomaly"]["precision"])
+        mlflow.log_metric("anomaly_recall", metrics["anomaly"]["recall"])
+        mlflow.log_metric("anomaly_f1", metrics["anomaly"]["f1"])
+
+        # Log classifier metrics
+        mlflow.log_metric("classifier_accuracy", metrics["classifier"]["accuracy"])
+        mlflow.log_metric("classifier_precision", metrics["classifier"]["precision"])
+        mlflow.log_metric("classifier_recall", metrics["classifier"]["recall"])
+        mlflow.log_metric("classifier_f1", metrics["classifier"]["f1"])
+
+        # Log per-attack-type metrics
+        for attack_type, attack_metrics in metrics["per_attack_type"].items():
+            mlflow.log_metric(f"{attack_type}_precision", attack_metrics["precision"])
+            mlflow.log_metric(f"{attack_type}_recall", attack_metrics["recall"])
+            mlflow.log_metric(f"{attack_type}_f1", attack_metrics["f1"])
+
+        # Log model artifacts
+        anomaly_model_path = output_dir / "anomaly_detector.joblib"
+        classifier_model_path = output_dir / "attack_classifier.joblib"
+
+        if anomaly_model_path.exists():
+            mlflow.log_artifact(str(anomaly_model_path), "models")
+
+        if classifier_model_path.exists():
+            mlflow.log_artifact(str(classifier_model_path), "models")
+
+        # Log metrics as JSON artifact
+        metrics_path = output_dir / "metrics.json"
+        with open(metrics_path, "w") as f:
+            # Convert numpy types for JSON serialization
+            json.dump(metrics, f, indent=2, default=str)
+        mlflow.log_artifact(str(metrics_path))
+
+        # Log confusion matrix as artifact
+        cm_path = output_dir / "confusion_matrix.json"
+        with open(cm_path, "w") as f:
+            json.dump(
+                {
+                    "matrix": metrics["classifier"]["confusion_matrix"],
+                    "labels": ATTACK_TYPES,
+                },
+                f,
+                indent=2,
+            )
+        mlflow.log_artifact(str(cm_path))
+
+        logger.info("mlflow_artifacts_logged", run_id=run_id)
+
+    return run_id
+
+
+# ============================================================================
+# Main Training Pipeline
+# ============================================================================
+
+
+@click.command()
+@click.option(
+    "--data-path",
+    type=click.Path(exists=False),
+    default=None,
+    help="Path to JSON file with training data. If not provided, generates synthetic data.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(),
+    default="models",
+    help="Directory to save trained models.",
+)
+@click.option(
+    "--n-samples",
+    type=int,
+    default=10000,
+    help="Number of synthetic samples to generate (if no data-path).",
+)
+@click.option(
+    "--attack-ratio",
+    type=float,
+    default=0.3,
+    help="Ratio of attack events in synthetic data.",
+)
+@click.option(
+    "--test-size",
+    type=float,
+    default=0.2,
+    help="Proportion of data to use for testing.",
+)
+@click.option(
+    "--val-size",
+    type=float,
+    default=0.1,
+    help="Proportion of training data to use for validation.",
+)
+@click.option(
+    "--contamination",
+    type=float,
+    default=0.1,
+    help="Expected proportion of outliers for anomaly detector.",
+)
+@click.option(
+    "--n-estimators",
+    type=int,
+    default=100,
+    help="Number of trees/boosting rounds for models.",
+)
+@click.option(
+    "--max-depth",
+    type=int,
+    default=6,
+    help="Maximum tree depth for classifier.",
+)
+@click.option(
+    "--learning-rate",
+    type=float,
+    default=0.1,
+    help="Learning rate for XGBoost classifier.",
+)
+@click.option(
+    "--seed",
+    type=int,
+    default=42,
+    help="Random seed for reproducibility.",
+)
+@click.option(
+    "--mlflow/--no-mlflow",
+    default=True,
+    help="Enable MLflow tracking.",
+)
+@click.option(
+    "--verbose",
+    is_flag=True,
+    help="Enable verbose output.",
+)
+def main(
+    data_path: str | None,
+    output_dir: str,
+    n_samples: int,
+    attack_ratio: float,
+    test_size: float,
+    val_size: float,
+    contamination: float,
+    n_estimators: int,
+    max_depth: int,
+    learning_rate: float,
+    seed: int,
+    mlflow_tracking: bool,
+    verbose: bool,
+) -> None:
+    """
+    Train Sentinel ML models for intrusion detection.
+
+    This script trains both the anomaly detector (Isolation Forest) and
+    attack classifier (XGBoost) models, evaluates their performance,
+    and optionally logs results to MLflow.
+
+    Examples:
+
+        # Train with synthetic data
+        python -m ml.training.train --n-samples 10000 --output-dir models/
+
+        # Train with real data
+        python -m ml.training.train --data-path data/events.json
+
+        # Train with custom parameters
+        python -m ml.training.train --n-estimators 200 --max-depth 8
+    """
+    # Setup logging
+    log_level = "DEBUG" if verbose else "INFO"
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(
+            getattr(structlog.stdlib, log_level, structlog.stdlib.INFO)
+        ),
+    )
+
+    logger.info(
+        "training_started",
+        data_path=data_path,
+        output_dir=output_dir,
+        n_samples=n_samples,
+        attack_ratio=attack_ratio,
+    )
+
+    # Create output directory
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # -------------------------------------------------------------------------
+    # Load/Generate Data
+    # -------------------------------------------------------------------------
+
+    X, y, labels = load_or_generate_data(
+        data_path=data_path,
+        n_samples=n_samples,
+        attack_ratio=attack_ratio,
+        seed=seed,
+    )
+
+    # Split data
+    X_train_full, X_test, y_train_full, y_test, labels_train_full, labels_test = (
+        train_test_split(
+            X, y, labels,
+            test_size=test_size,
+            random_state=seed,
+            stratify=y,
+        )
+    )
+
+    # Further split training into train and validation
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_train_full, y_train_full,
+        test_size=val_size,
+        random_state=seed,
+        stratify=y_train_full,
+    )
+
+    logger.info(
+        "data_split",
+        train_size=len(X_train),
+        val_size=len(X_val),
+        test_size=len(X_test),
+    )
+
+    # Print class distribution
+    from collections import Counter
+    train_dist = Counter([labels[i] for i in range(len(labels)) if i < len(X_train_full)])
+    logger.info("class_distribution", distribution=dict(train_dist))
+
+    # -------------------------------------------------------------------------
+    # Train Models
+    # -------------------------------------------------------------------------
+
+    print("\n" + "=" * 60)
+    print("Training Anomaly Detector (Isolation Forest)")
+    print("=" * 60)
+
+    detector = train_anomaly_detector(
+        X_train=X_train,
+        contamination=contamination,
+        n_estimators=n_estimators,
+        random_state=seed,
+    )
+
+    # Save anomaly detector
+    detector_path = output_path / "anomaly_detector.joblib"
+    detector.save(detector_path)
+    print(f"Anomaly detector saved to: {detector_path}")
+
+    print("\n" + "=" * 60)
+    print("Training Attack Classifier (XGBoost)")
+    print("=" * 60)
+
+    classifier = train_classifier(
+        X_train=X_train,
+        y_train=y_train,
+        X_val=X_val,
+        y_val=y_val,
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        learning_rate=learning_rate,
+        random_state=seed,
+    )
+
+    # Save classifier
+    classifier_path = output_path / "attack_classifier.joblib"
+    classifier.save(classifier_path)
+    print(f"Attack classifier saved to: {classifier_path}")
+
+    # -------------------------------------------------------------------------
+    # Evaluate Models
+    # -------------------------------------------------------------------------
+
+    print("\n" + "=" * 60)
+    print("Evaluating Models")
+    print("=" * 60)
+
+    metrics = evaluate_models(
+        detector=detector,
+        classifier=classifier,
+        X_test=X_test,
+        y_test=y_test,
+        labels_test=labels_test,
+    )
+
+    # Print summary
+    print("\n--- Anomaly Detection Metrics ---")
+    print(f"  Accuracy:  {metrics['anomaly']['accuracy']:.4f}")
+    print(f"  Precision: {metrics['anomaly']['precision']:.4f}")
+    print(f"  Recall:    {metrics['anomaly']['recall']:.4f}")
+    print(f"  F1 Score:  {metrics['anomaly']['f1']:.4f}")
+
+    print("\n--- Attack Classification Metrics ---")
+    print(f"  Accuracy:  {metrics['classifier']['accuracy']:.4f}")
+    print(f"  Precision: {metrics['classifier']['precision']:.4f}")
+    print(f"  Recall:    {metrics['classifier']['recall']:.4f}")
+    print(f"  F1 Score:  {metrics['classifier']['f1']:.4f}")
+
+    print("\n--- Per-Attack-Type F1 Scores ---")
+    for attack_type, attack_metrics in metrics["per_attack_type"].items():
+        support = attack_metrics.get("support", 0)
+        f1 = attack_metrics.get("f1", 0)
+        print(f"  {attack_type:25s}: {f1:.4f} (n={support})")
+
+    # -------------------------------------------------------------------------
+    # MLflow Logging
+    # -------------------------------------------------------------------------
+
+    if mlflow_tracking:
+        print("\n" + "=" * 60)
+        print("Logging to MLflow")
+        print("=" * 60)
+
+        params = {
+            "n_samples": n_samples,
+            "attack_ratio": attack_ratio,
+            "test_size": test_size,
+            "val_size": val_size,
+            "contamination": contamination,
+            "n_estimators": n_estimators,
+            "max_depth": max_depth,
+            "learning_rate": learning_rate,
+            "seed": seed,
+            "data_path": str(data_path) if data_path else "synthetic",
+        }
+
+        run_id = log_to_mlflow(
+            metrics=metrics,
+            detector=detector,
+            classifier=classifier,
+            params=params,
+            output_dir=output_path,
+        )
+
+        print(f"MLflow run ID: {run_id}")
+        print(f"View at: mlflow ui")
+
+    # -------------------------------------------------------------------------
+    # Save Metrics Summary
+    # -------------------------------------------------------------------------
+
+    summary = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "data": {
+            "source": str(data_path) if data_path else "synthetic",
+            "n_samples": n_samples if not data_path else len(X),
+            "train_size": len(X_train),
+            "val_size": len(X_val),
+            "test_size": len(X_test),
+        },
+        "parameters": {
+            "contamination": contamination,
+            "n_estimators": n_estimators,
+            "max_depth": max_depth,
+            "learning_rate": learning_rate,
+            "seed": seed,
+        },
+        "metrics": metrics,
+        "model_paths": {
+            "anomaly_detector": str(detector_path),
+            "attack_classifier": str(classifier_path),
+        },
+    }
+
+    summary_path = output_path / "training_summary.json"
+    with open(summary_path, "w") as f:
+        json.dump(summary, f, indent=2, default=str)
+
+    print(f"\nTraining summary saved to: {summary_path}")
+    print("\n" + "=" * 60)
+    print("Training Complete!")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()

