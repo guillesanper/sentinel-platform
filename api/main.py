@@ -11,30 +11,31 @@ Endpoints:
 - GET /metrics - Prometheus metrics
 """
 
+import time
+import uuid
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import AsyncGenerator
-import uuid
 
-from fastapi import FastAPI, HTTPException, Depends, Request, status
+import structlog
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-import structlog
+from slowapi.util import get_remote_address
 
+from api.middleware.logging import setup_logging
 from api.models.schemas import (
-    SecurityEvent,
-    PredictionResult,
     BatchPredictionRequest,
     BatchPredictionResult,
     HealthResponse,
+    PredictionResult,
     ReadyResponse,
+    SecurityEvent,
 )
-from api.security.auth import verify_token, TokenData
-from api.middleware.logging import setup_logging
+from api.security.auth import TokenData, verify_token
 from ml.features.pipeline import FeatureExtractor
 from ml.models.anomaly_detector import AnomalyDetector
 from ml.models.classifier import AttackClassifier
@@ -79,38 +80,27 @@ ATTACK_TYPE_COUNT = Counter(
 # ============================================================================
 limiter = Limiter(key_func=get_remote_address)
 
-# ============================================================================
-# Global Model Instances
-# ============================================================================
-feature_extractor: FeatureExtractor | None = None
-anomaly_detector: AnomalyDetector | None = None
-attack_classifier: AttackClassifier | None = None
-fusion_layer: FusionLayer | None = None
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan - load models on startup."""
-    global feature_extractor, anomaly_detector, attack_classifier, fusion_layer
-    
     logger.info("Starting Sentinel API...")
-    
-    # Initialize components
-    feature_extractor = FeatureExtractor()
-    anomaly_detector = AnomalyDetector()
-    attack_classifier = AttackClassifier()
-    fusion_layer = FusionLayer()
-    
+
+    # Initialize components and store in app.state
+    app.state.feature_extractor = FeatureExtractor()
+    app.state.anomaly_detector = AnomalyDetector()
+    app.state.attack_classifier = AttackClassifier()
+    app.state.fusion_layer = FusionLayer()
+
     # Load trained models (if available)
     try:
-        anomaly_detector.load()
-        attack_classifier.load()
+        app.state.anomaly_detector.load()
+        app.state.attack_classifier.load()
         logger.info("Models loaded successfully")
     except FileNotFoundError:
         logger.warning("No trained models found - using untrained models")
-    
+
     yield
-    
+
     logger.info("Shutting down Sentinel API...")
 
 
@@ -156,12 +146,10 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> Respon
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
     """Record request metrics."""
-    import time
-    
     start_time = time.time()
     response = await call_next(request)
     duration = time.time() - start_time
-    
+
     # Record metrics
     REQUEST_LATENCY.labels(endpoint=request.url.path).observe(duration)
     REQUEST_COUNT.labels(
@@ -169,7 +157,7 @@ async def metrics_middleware(request: Request, call_next):
         method=request.method,
         status=response.status_code,
     ).inc()
-    
+
     return response
 
 
@@ -183,22 +171,25 @@ async def health() -> HealthResponse:
 
 
 @app.get("/ready", response_model=ReadyResponse, tags=["Health"])
-async def ready() -> ReadyResponse:
+async def ready(request: Request) -> ReadyResponse:
     """Readiness check - is the service ready to receive traffic?"""
+    feature_extractor = getattr(request.app.state, "feature_extractor", None)
+    anomaly_detector = getattr(request.app.state, "anomaly_detector", None)
+    attack_classifier = getattr(request.app.state, "attack_classifier", None)
     checks = {
         "feature_extractor": feature_extractor is not None,
         "anomaly_detector": anomaly_detector is not None and anomaly_detector.is_loaded,
         "attack_classifier": attack_classifier is not None and attack_classifier.is_loaded,
     }
-    
+
     all_ready = all(checks.values())
-    
+
     if not all_ready:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"status": "not_ready", "checks": checks},
         )
-    
+
     return ReadyResponse(status="ready", checks=checks)
 
 
@@ -223,7 +214,7 @@ async def predict(
 ) -> PredictionResult:
     """
     Analyze a single security event and return threat assessment.
-    
+
     This endpoint:
     1. Extracts features from the event
     2. Runs anomaly detection
@@ -231,7 +222,7 @@ async def predict(
     4. Combines results with fusion layer
     """
     event_id = str(uuid.uuid4())
-    
+
     logger.info(
         "prediction_request",
         event_id=event_id,
@@ -239,22 +230,22 @@ async def predict(
         user=event.actor.user,
         source_ip=event.actor.source_ip,
     )
-    
+
     try:
         # 1. Extract features
-        features = feature_extractor.transform(event.model_dump())
-        
+        features = request.app.state.feature_extractor.transform(event.model_dump())
+
         # 2. Run models
-        anomaly_result = anomaly_detector.predict(features)
-        classification_result = attack_classifier.predict(features)
-        
+        anomaly_result = request.app.state.anomaly_detector.predict(features)
+        classification_result = request.app.state.attack_classifier.predict(features)
+
         # 3. Combine with fusion layer
-        fusion_result = fusion_layer.combine(
+        fusion_result = request.app.state.fusion_layer.combine(
             anomaly_result=anomaly_result,
             classification_result=classification_result,
             event=event.model_dump(),
         )
-        
+
         # 4. Build response
         result = PredictionResult(
             event_id=event_id,
@@ -267,11 +258,11 @@ async def predict(
             recommended_actions=fusion_result["recommended_actions"],
             timestamp=datetime.utcnow(),
         )
-        
+
         # 5. Record metrics
         PREDICTION_SCORE.observe(result.threat_score)
         ATTACK_TYPE_COUNT.labels(attack_type=result.attack_type).inc()
-        
+
         logger.info(
             "prediction_complete",
             event_id=event_id,
@@ -279,9 +270,9 @@ async def predict(
             severity=result.severity,
             attack_type=result.attack_type,
         )
-        
+
         return result
-        
+
     except Exception as e:
         logger.error("prediction_failed", event_id=event_id, error=str(e))
         raise HTTPException(
@@ -299,7 +290,7 @@ async def analyze_batch(
 ) -> BatchPredictionResult:
     """
     Analyze a batch of security events (max 100).
-    
+
     Useful for bulk processing of historical logs.
     """
     if len(batch.events) > 100:
@@ -307,9 +298,9 @@ async def analyze_batch(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Maximum 100 events per batch",
         )
-    
+
     logger.info("batch_prediction_request", count=len(batch.events))
-    
+
     results = []
     for event in batch.events:
         try:
@@ -318,7 +309,7 @@ async def analyze_batch(
         except HTTPException:
             # Skip failed predictions in batch mode
             logger.warning("batch_prediction_item_failed", event=event.model_dump())
-    
+
     return BatchPredictionResult(
         total=len(batch.events),
         processed=len(results),
@@ -345,7 +336,7 @@ async def global_exception_handler(request: Request, exc: Exception) -> Response
 # ============================================================================
 if __name__ == "__main__":
     import uvicorn
-    
+
     uvicorn.run(
         "main:app",
         host="0.0.0.0",

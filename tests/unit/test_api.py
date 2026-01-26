@@ -4,11 +4,11 @@ Unit tests for FastAPI endpoints.
 Tests the Sentinel Security API endpoints using TestClient.
 """
 
-import pytest
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
-import numpy as np
 
+import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 from jose import jwt
 
@@ -19,11 +19,12 @@ from jose import jwt
 @pytest.fixture
 def mock_models():
     """Mock the ML models for testing."""
-    with patch("api.main.FeatureExtractor") as mock_extractor, \
-         patch("api.main.AnomalyDetector") as mock_detector, \
-         patch("api.main.AttackClassifier") as mock_classifier, \
-         patch("api.main.FusionLayer") as mock_fusion:
-
+    with (
+        patch("api.main.FeatureExtractor") as mock_extractor,
+        patch("api.main.AnomalyDetector") as mock_detector,
+        patch("api.main.AttackClassifier") as mock_classifier,
+        patch("api.main.FusionLayer") as mock_fusion,
+    ):
         # Configure mock extractor
         mock_extractor_instance = MagicMock()
         mock_extractor_instance.transform.return_value = np.zeros(17, dtype=np.float32)
@@ -85,6 +86,7 @@ def mock_models():
 def client(mock_models):
     """Create a test client with mocked models."""
     from api.main import app
+
     with TestClient(app) as test_client:
         yield test_client
 
@@ -92,7 +94,7 @@ def client(mock_models):
 @pytest.fixture
 def valid_token() -> str:
     """Generate a valid JWT token for testing."""
-    from api.security.auth import JWT_SECRET_KEY, JWT_ALGORITHM
+    from api.security.auth import JWT_ALGORITHM, JWT_SECRET_KEY
 
     payload = {
         "sub": "test_user",
@@ -221,8 +223,9 @@ class TestMetricsEndpoint:
     def test_metrics_content_type(self, client: TestClient) -> None:
         """Test metrics endpoint returns Prometheus format."""
         response = client.get("/metrics")
-        assert "text/plain" in response.headers["content-type"] or \
-               "text/plain" in response.headers.get("content-type", "")
+        assert "text/plain" in response.headers[
+            "content-type"
+        ] or "text/plain" in response.headers.get("content-type", "")
 
     def test_metrics_no_auth_required(self, client: TestClient) -> None:
         """Test metrics endpoint doesn't require authentication."""
@@ -238,9 +241,7 @@ class TestMetricsEndpoint:
 class TestPredictEndpoint:
     """Tests for POST /v1/predict endpoint."""
 
-    def test_predict_requires_auth(
-        self, client: TestClient, valid_event: dict
-    ) -> None:
+    def test_predict_requires_auth(self, client: TestClient, valid_event: dict) -> None:
         """Test predict endpoint requires authentication."""
         response = client.post("/v1/predict", json=valid_event)
         assert response.status_code == 401
@@ -391,9 +392,7 @@ class TestPredictEndpoint:
 class TestBatchPredictEndpoint:
     """Tests for POST /v1/analyze/batch endpoint."""
 
-    def test_batch_requires_auth(
-        self, client: TestClient, valid_event: dict
-    ) -> None:
+    def test_batch_requires_auth(self, client: TestClient, valid_event: dict) -> None:
         """Test batch endpoint requires authentication."""
         response = client.post(
             "/v1/analyze/batch",
@@ -491,16 +490,12 @@ class TestBatchPredictEndpoint:
 class TestAuthentication:
     """Tests for authentication behavior."""
 
-    def test_missing_auth_header(
-        self, client: TestClient, valid_event: dict
-    ) -> None:
+    def test_missing_auth_header(self, client: TestClient, valid_event: dict) -> None:
         """Test request without auth header is rejected."""
         response = client.post("/v1/predict", json=valid_event)
         assert response.status_code == 401
 
-    def test_invalid_token_format(
-        self, client: TestClient, valid_event: dict
-    ) -> None:
+    def test_invalid_token_format(self, client: TestClient, valid_event: dict) -> None:
         """Test request with invalid token format is rejected."""
         headers = {"Authorization": "InvalidToken"}
         response = client.post(
@@ -510,11 +505,9 @@ class TestAuthentication:
         )
         assert response.status_code == 401
 
-    def test_expired_token(
-        self, client: TestClient, valid_event: dict
-    ) -> None:
+    def test_expired_token(self, client: TestClient, valid_event: dict) -> None:
         """Test request with expired token is rejected."""
-        from api.security.auth import JWT_SECRET_KEY, JWT_ALGORITHM
+        from api.security.auth import JWT_ALGORITHM, JWT_SECRET_KEY
 
         # Create an expired token
         payload = {
@@ -533,9 +526,7 @@ class TestAuthentication:
         )
         assert response.status_code == 401
 
-    def test_invalid_signature(
-        self, client: TestClient, valid_event: dict
-    ) -> None:
+    def test_invalid_signature(self, client: TestClient, valid_event: dict) -> None:
         """Test request with invalid signature is rejected."""
         from api.security.auth import JWT_ALGORITHM
 
@@ -635,7 +626,7 @@ class TestInputValidation:
             "lat": 200,  # Invalid latitude
             "lon": 0,
         }
-        response = client.post(
+        client.post(
             "/v1/predict",
             json=valid_event,
             headers=auth_headers,

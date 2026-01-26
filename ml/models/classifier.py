@@ -10,8 +10,8 @@ from typing import Any
 
 import joblib
 import numpy as np
-import xgboost as xgb
 import structlog
+import xgboost as xgb
 
 logger = structlog.get_logger()
 
@@ -31,7 +31,7 @@ ATTACK_TYPES = [
 
 # Label to index mapping
 LABEL_TO_IDX = {label: idx for idx, label in enumerate(ATTACK_TYPES)}
-IDX_TO_LABEL = {idx: label for idx, label in enumerate(ATTACK_TYPES)}
+IDX_TO_LABEL = dict(enumerate(ATTACK_TYPES))
 
 
 class AttackClassifier:
@@ -148,8 +148,7 @@ class AttackClassifier:
         if eval_set:
             # Encode eval set labels
             encoded_eval_set = [
-                (X_eval, self._encode_labels(y_eval))
-                for X_eval, y_eval in eval_set
+                (X_eval, self._encode_labels(y_eval)) for X_eval, y_eval in eval_set
             ]
             fit_params["eval_set"] = encoded_eval_set
             fit_params["verbose"] = False
@@ -183,6 +182,8 @@ class AttackClassifier:
         if not self.is_loaded:
             raise RuntimeError("Model not trained or loaded. Call fit() or load() first.")
 
+        assert self._model is not None  # Type narrowing for mypy
+
         # Ensure 2D input
         if X.ndim == 1:
             X = X.reshape(1, -1)
@@ -199,24 +200,22 @@ class AttackClassifier:
             return {
                 "attack_type": IDX_TO_LABEL[pred_idx],
                 "confidence": float(probs[pred_idx]),
-                "probabilities": {
-                    label: float(probs[idx])
-                    for label, idx in LABEL_TO_IDX.items()
-                },
+                "probabilities": {label: float(probs[idx]) for label, idx in LABEL_TO_IDX.items()},
             }
 
         # For batch
         results = []
-        for i, (pred_idx, probs) in enumerate(zip(predictions, probabilities)):
-            pred_idx = int(pred_idx)
-            results.append({
-                "attack_type": IDX_TO_LABEL[pred_idx],
-                "confidence": float(probs[pred_idx]),
-                "probabilities": {
-                    label: float(probs[idx])
-                    for label, idx in LABEL_TO_IDX.items()
-                },
-            })
+        for pred, probs in zip(predictions, probabilities, strict=True):
+            idx = int(pred)
+            results.append(
+                {
+                    "attack_type": IDX_TO_LABEL[idx],
+                    "confidence": float(probs[idx]),
+                    "probabilities": {
+                        label: float(probs[idx]) for label, idx in LABEL_TO_IDX.items()
+                    },
+                }
+            )
 
         return {"results": results}
 
@@ -232,6 +231,8 @@ class AttackClassifier:
         """
         if not self.is_loaded:
             raise RuntimeError("Model not trained or loaded.")
+
+        assert self._model is not None  # Type narrowing for mypy
 
         if X.ndim == 1:
             X = X.reshape(1, -1)
@@ -254,7 +255,7 @@ class AttackClassifier:
 
     def _get_top_features(self, top_k: int = 5) -> list[tuple[int, float]]:
         """Get top feature importances."""
-        if not self.is_loaded:
+        if not self.is_loaded or self._model is None:
             return []
 
         importances = self._model.feature_importances_
@@ -264,13 +265,10 @@ class AttackClassifier:
 
     def get_feature_importance(self) -> dict[int, float]:
         """Get all feature importances."""
-        if not self.is_loaded:
+        if not self.is_loaded or self._model is None:
             return {}
 
-        return {
-            i: float(imp)
-            for i, imp in enumerate(self._model.feature_importances_)
-        }
+        return {i: float(imp) for i, imp in enumerate(self._model.feature_importances_)}
 
     def save(self, path: Path | str | None = None) -> None:
         """

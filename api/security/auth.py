@@ -6,14 +6,14 @@ Tokens are validated on each request to protected endpoints.
 """
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
+import structlog
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from pydantic import BaseModel, Field
-import structlog
 
 logger = structlog.get_logger()
 
@@ -67,7 +67,7 @@ class TokenData(BaseModel):
     @property
     def is_expired(self) -> bool:
         """Check if token has expired."""
-        return datetime.now(timezone.utc) > self.exp.replace(tzinfo=timezone.utc)
+        return datetime.now(UTC) > self.exp.replace(tzinfo=UTC)
 
 
 class TokenResponse(BaseModel):
@@ -110,7 +110,7 @@ def create_access_token(
     if expires_delta is None:
         expires_delta = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     expire = now + expires_delta
 
     payload = {
@@ -123,7 +123,7 @@ def create_access_token(
     if tenant_id:
         payload["tenant_id"] = tenant_id
 
-    encoded_jwt = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+    encoded_jwt: str = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
     logger.info(
         "token_created",
@@ -171,8 +171,12 @@ def decode_token(token: str) -> TokenData:
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-        exp = datetime.fromtimestamp(exp_timestamp, tz=timezone.utc)
-        iat = datetime.fromtimestamp(iat_timestamp, tz=timezone.utc) if iat_timestamp else datetime.now(timezone.utc)
+        exp = datetime.fromtimestamp(exp_timestamp, tz=UTC)
+        iat = (
+            datetime.fromtimestamp(iat_timestamp, tz=UTC)
+            if iat_timestamp
+            else datetime.now(UTC)
+        )
 
         return TokenData(
             sub=subject,

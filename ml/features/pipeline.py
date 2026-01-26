@@ -7,7 +7,7 @@ for ML model consumption.
 
 import ipaddress
 from datetime import datetime
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 import structlog
@@ -102,7 +102,7 @@ class FeatureExtractor:
     """
 
     # Feature names for interpretability
-    FEATURE_NAMES = [
+    FEATURE_NAMES: ClassVar[list[str]] = [
         "hour_of_day",
         "day_of_week",
         "is_weekend",
@@ -218,10 +218,11 @@ class FeatureExtractor:
 
         # Action subtype for privileged detection
         action_subtype = action.get("subtype", "").lower()
-        is_privileged = 1.0 if any(
-            priv in action_type or priv in action_subtype
-            for priv in PRIVILEGED_ACTIONS
-        ) else 0.0
+        is_privileged = (
+            1.0
+            if any(priv in action_type or priv in action_subtype for priv in PRIVILEGED_ACTIONS)
+            else 0.0
+        )
 
         # Action result
         result = action.get("result", "unknown").lower()

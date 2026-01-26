@@ -10,15 +10,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ml.models.anomaly_detector import AnomalyDetector, DEFAULT_MODEL_PATH
-from ml.models.classifier import (
-    AttackClassifier,
-    ATTACK_TYPES,
-    LABEL_TO_IDX,
-    IDX_TO_LABEL,
-)
-from ml.models.fusion import FusionLayer, SEVERITY_THRESHOLDS
-
+from ml.models.anomaly_detector import AnomalyDetector
+from ml.models.classifier import ATTACK_TYPES, AttackClassifier
+from ml.models.fusion import FusionLayer
 
 # ============================================================================
 # Fixtures
@@ -54,9 +48,7 @@ def trained_detector(sample_features: np.ndarray) -> AnomalyDetector:
 
 
 @pytest.fixture
-def trained_classifier(
-    sample_features: np.ndarray, sample_labels: np.ndarray
-) -> AttackClassifier:
+def trained_classifier(sample_features: np.ndarray, sample_labels: np.ndarray) -> AttackClassifier:
     """Create a trained attack classifier."""
     classifier = AttackClassifier(
         n_estimators=10,  # Small for fast tests
@@ -131,9 +123,7 @@ class TestAnomalyDetectorPredict:
         with pytest.raises(RuntimeError, match="not trained or loaded"):
             detector.predict(np.random.rand(17))
 
-    def test_predict_single_sample(
-        self, trained_detector: AnomalyDetector
-    ) -> None:
+    def test_predict_single_sample(self, trained_detector: AnomalyDetector) -> None:
         """Test prediction on a single sample."""
         sample = np.random.rand(17).astype(np.float32)
         result = trained_detector.predict(sample)
@@ -143,9 +133,7 @@ class TestAnomalyDetectorPredict:
         assert "raw_score" in result
         assert "confidence" in result
 
-    def test_predict_score_range(
-        self, trained_detector: AnomalyDetector
-    ) -> None:
+    def test_predict_score_range(self, trained_detector: AnomalyDetector) -> None:
         """Test that prediction score is in [0, 1]."""
         sample = np.random.rand(17).astype(np.float32)
         result = trained_detector.predict(sample)
@@ -153,9 +141,7 @@ class TestAnomalyDetectorPredict:
         assert 0 <= result["score"] <= 1
         assert 0 <= result["confidence"] <= 1
 
-    def test_predict_returns_bool_is_anomaly(
-        self, trained_detector: AnomalyDetector
-    ) -> None:
+    def test_predict_returns_bool_is_anomaly(self, trained_detector: AnomalyDetector) -> None:
         """Test that is_anomaly is a boolean."""
         sample = np.random.rand(17).astype(np.float32)
         result = trained_detector.predict(sample)
@@ -183,9 +169,7 @@ class TestAnomalyDetectorSaveLoad:
         with pytest.raises(RuntimeError, match="No trained model"):
             detector.save()
 
-    def test_save_load_roundtrip(
-        self, trained_detector: AnomalyDetector
-    ) -> None:
+    def test_save_load_roundtrip(self, trained_detector: AnomalyDetector) -> None:
         """Test save and load preserves model."""
         with tempfile.TemporaryDirectory() as tmpdir:
             model_path = Path(tmpdir) / "detector.joblib"
@@ -207,9 +191,7 @@ class TestAnomalyDetectorSaveLoad:
         with pytest.raises(FileNotFoundError):
             detector.load("/nonexistent/path.joblib")
 
-    def test_predictions_match_after_load(
-        self, trained_detector: AnomalyDetector
-    ) -> None:
+    def test_predictions_match_after_load(self, trained_detector: AnomalyDetector) -> None:
         """Test that loaded model gives same predictions."""
         sample = np.random.rand(17).astype(np.float32)
         original_result = trained_detector.predict(sample)
@@ -277,9 +259,7 @@ class TestAttackClassifierInit:
 class TestAttackClassifierFit:
     """Tests for AttackClassifier training."""
 
-    def test_fit_returns_self(
-        self, sample_features: np.ndarray, sample_labels: np.ndarray
-    ) -> None:
+    def test_fit_returns_self(self, sample_features: np.ndarray, sample_labels: np.ndarray) -> None:
         """Test that fit returns self for chaining."""
         classifier = AttackClassifier(n_estimators=10)
         result = classifier.fit(sample_features, sample_labels)
@@ -324,9 +304,7 @@ class TestAttackClassifierPredict:
         with pytest.raises(RuntimeError, match="not trained or loaded"):
             classifier.predict(np.random.rand(17))
 
-    def test_predict_single_sample(
-        self, trained_classifier: AttackClassifier
-    ) -> None:
+    def test_predict_single_sample(self, trained_classifier: AttackClassifier) -> None:
         """Test prediction on a single sample."""
         sample = np.random.rand(17).astype(np.float32)
         result = trained_classifier.predict(sample)
@@ -335,27 +313,21 @@ class TestAttackClassifierPredict:
         assert "confidence" in result
         assert "probabilities" in result
 
-    def test_predict_attack_type_valid(
-        self, trained_classifier: AttackClassifier
-    ) -> None:
+    def test_predict_attack_type_valid(self, trained_classifier: AttackClassifier) -> None:
         """Test that predicted attack type is valid."""
         sample = np.random.rand(17).astype(np.float32)
         result = trained_classifier.predict(sample)
 
         assert result["attack_type"] in ATTACK_TYPES
 
-    def test_predict_confidence_range(
-        self, trained_classifier: AttackClassifier
-    ) -> None:
+    def test_predict_confidence_range(self, trained_classifier: AttackClassifier) -> None:
         """Test that confidence is in [0, 1]."""
         sample = np.random.rand(17).astype(np.float32)
         result = trained_classifier.predict(sample)
 
         assert 0 <= result["confidence"] <= 1
 
-    def test_predict_probabilities_sum_to_one(
-        self, trained_classifier: AttackClassifier
-    ) -> None:
+    def test_predict_probabilities_sum_to_one(self, trained_classifier: AttackClassifier) -> None:
         """Test that class probabilities sum to 1."""
         sample = np.random.rand(17).astype(np.float32)
         result = trained_classifier.predict(sample)
@@ -393,9 +365,7 @@ class TestAttackClassifierSaveLoad:
         with pytest.raises(RuntimeError, match="No trained model"):
             classifier.save()
 
-    def test_save_load_roundtrip(
-        self, trained_classifier: AttackClassifier
-    ) -> None:
+    def test_save_load_roundtrip(self, trained_classifier: AttackClassifier) -> None:
         """Test save and load preserves model."""
         with tempfile.TemporaryDirectory() as tmpdir:
             model_path = Path(tmpdir) / "classifier.joblib"
@@ -411,9 +381,7 @@ class TestAttackClassifierSaveLoad:
             assert new_classifier.is_loaded
             assert new_classifier.classes == trained_classifier.classes
 
-    def test_predictions_match_after_load(
-        self, trained_classifier: AttackClassifier
-    ) -> None:
+    def test_predictions_match_after_load(self, trained_classifier: AttackClassifier) -> None:
         """Test that loaded model gives same predictions."""
         sample = np.random.rand(17).astype(np.float32)
         original_result = trained_classifier.predict(sample)
@@ -433,9 +401,7 @@ class TestAttackClassifierSaveLoad:
 class TestAttackClassifierFeatureImportance:
     """Tests for feature importance methods."""
 
-    def test_get_feature_importance(
-        self, trained_classifier: AttackClassifier
-    ) -> None:
+    def test_get_feature_importance(self, trained_classifier: AttackClassifier) -> None:
         """Test get_feature_importance returns dict."""
         importance = trained_classifier.get_feature_importance()
 

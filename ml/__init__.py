@@ -2,13 +2,13 @@
 
 from ml.features.pipeline import FeatureExtractor
 from ml.models.anomaly_detector import AnomalyDetector
-from ml.models.classifier import AttackClassifier, ATTACK_TYPES
+from ml.models.classifier import ATTACK_TYPES, AttackClassifier
 from ml.models.fusion import FusionLayer
 
 __all__ = [
-    "FeatureExtractor",
+    "ATTACK_TYPES",
     "AnomalyDetector",
     "AttackClassifier",
+    "FeatureExtractor",
     "FusionLayer",
-    "ATTACK_TYPES",
 ]
