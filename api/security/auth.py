@@ -172,11 +172,7 @@ def decode_token(token: str) -> TokenData:
             )
 
         exp = datetime.fromtimestamp(exp_timestamp, tz=UTC)
-        iat = (
-            datetime.fromtimestamp(iat_timestamp, tz=UTC)
-            if iat_timestamp
-            else datetime.now(UTC)
-        )
+        iat = datetime.fromtimestamp(iat_timestamp, tz=UTC) if iat_timestamp else datetime.now(UTC)
 
         return TokenData(
             sub=subject,

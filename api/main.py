@@ -80,6 +80,7 @@ ATTACK_TYPE_COUNT = Counter(
 # ============================================================================
 limiter = Limiter(key_func=get_remote_address)
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan - load models on startup."""
