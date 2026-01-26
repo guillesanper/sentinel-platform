@@ -169,7 +169,9 @@ class FusionLayer:
         # Combine scores with weights
         # For classification, use (1 - normal_probability) as threat indicator
         normal_prob = class_probabilities.get("normal", 0.5)
-        classification_threat = 1.0 - normal_prob if attack_type == "normal" else classification_confidence
+        classification_threat = (
+            1.0 - normal_prob if attack_type == "normal" else classification_confidence
+        )
 
         threat_score = (
             self.anomaly_weight * anomaly_score
@@ -222,9 +224,7 @@ class FusionLayer:
                 "anomaly_score": round(anomaly_score, 4),
                 "classification_confidence": round(classification_confidence, 4),
                 "rules_score": round(rules_score, 4),
-                "class_probabilities": {
-                    k: round(v, 4) for k, v in class_probabilities.items()
-                },
+                "class_probabilities": {k: round(v, 4) for k, v in class_probabilities.items()},
             },
         }
 
@@ -265,6 +265,7 @@ class FusionLayer:
         timestamp = event.get("timestamp")
         if timestamp:
             from datetime import datetime
+
             try:
                 if isinstance(timestamp, str):
                     dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
@@ -290,10 +291,13 @@ class FusionLayer:
 
         # Rule 4: External IP for internal actions
         source_ip = actor.get("source_ip", "")
-        if source_ip and not self._is_internal_ip(source_ip):
-            if source.get("type") in ("system", "auth"):
-                score += 0.15
-                explanations.append("External IP accessing internal resource")
+        if (
+            source_ip
+            and not self._is_internal_ip(source_ip)
+            and source.get("type") in ("system", "auth")
+        ):
+            score += 0.15
+            explanations.append("External IP accessing internal resource")
 
         # Rule 5: Attack type specific boosts
         if attack_type in ("privilege_escalation", "data_exfiltration"):
@@ -310,6 +314,7 @@ class FusionLayer:
     def _is_internal_ip(self, ip_str: str) -> bool:
         """Check if IP is in private range."""
         import ipaddress
+
         try:
             ip = ipaddress.ip_address(ip_str)
             return ip.is_private
@@ -342,8 +347,7 @@ class FusionLayer:
 
         # Weighted average of individual confidences
         avg_confidence = (
-            self.anomaly_weight * anomaly_conf
-            + self.classification_weight * classification_conf
+            self.anomaly_weight * anomaly_conf + self.classification_weight * classification_conf
         ) / (self.anomaly_weight + self.classification_weight)
 
         # Combine with agreement factor
@@ -364,9 +368,7 @@ class FusionLayer:
         # Anomaly explanation
         if anomaly_result.get("is_anomaly"):
             score = anomaly_result.get("score", 0)
-            explanations.append(
-                f"Anomalous behavior detected (score: {score:.2f})"
-            )
+            explanations.append(f"Anomalous behavior detected (score: {score:.2f})")
 
         # Classification explanation
         attack_type = classification_result.get("attack_type", "normal")
@@ -382,7 +384,6 @@ class FusionLayer:
 
         # Event-specific context
         actor = event.get("actor", {})
-        action = event.get("action", {})
 
         if actor.get("user"):
             explanations.append(f"User involved: {actor['user']}")
@@ -397,7 +398,7 @@ class FusionLayer:
         self,
         attack_type: str,
         severity: str,
-        threat_score: float,
+        threat_score: float,  # noqa: ARG002
     ) -> list[str]:
         """Get recommended actions based on attack type and severity."""
         # Get attack-specific recommendations

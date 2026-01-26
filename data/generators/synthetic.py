@@ -14,7 +14,7 @@ Generates realistic security events for each attack type:
 import random
 import string
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, ClassVar
 
 import structlog
 
@@ -26,26 +26,69 @@ logger = structlog.get_logger()
 
 # Common usernames for generation
 NORMAL_USERS = [
-    "alice", "bob", "charlie", "david", "eve", "frank", "grace", "henry",
-    "isabel", "jack", "kate", "liam", "mary", "nancy", "oliver", "peter",
-    "quinn", "rachel", "steve", "tina", "user1", "user2", "user3",
-    "admin", "root", "sysadmin", "devops", "jenkins", "deploy",
+    "alice",
+    "bob",
+    "charlie",
+    "david",
+    "eve",
+    "frank",
+    "grace",
+    "henry",
+    "isabel",
+    "jack",
+    "kate",
+    "liam",
+    "mary",
+    "nancy",
+    "oliver",
+    "peter",
+    "quinn",
+    "rachel",
+    "steve",
+    "tina",
+    "user1",
+    "user2",
+    "user3",
+    "admin",
+    "root",
+    "sysadmin",
+    "devops",
+    "jenkins",
+    "deploy",
 ]
 
 SERVICE_ACCOUNTS = [
-    "svc_backup", "svc_monitor", "svc_deploy", "svc_db", "svc_web",
-    "prometheus", "grafana", "nginx", "apache", "postgres", "mysql",
+    "svc_backup",
+    "svc_monitor",
+    "svc_deploy",
+    "svc_db",
+    "svc_web",
+    "prometheus",
+    "grafana",
+    "nginx",
+    "apache",
+    "postgres",
+    "mysql",
 ]
 
 # Hostnames
 HOSTNAMES = [
-    "web-server-01", "web-server-02", "web-server-03",
-    "api-server-01", "api-server-02",
-    "db-server-01", "db-server-02",
-    "auth-server-01", "cache-server-01",
-    "worker-01", "worker-02", "worker-03",
-    "bastion-01", "monitoring-01",
-    "jenkins-01", "gitlab-runner-01",
+    "web-server-01",
+    "web-server-02",
+    "web-server-03",
+    "api-server-01",
+    "api-server-02",
+    "db-server-01",
+    "db-server-02",
+    "auth-server-01",
+    "cache-server-01",
+    "worker-01",
+    "worker-02",
+    "worker-03",
+    "bastion-01",
+    "monitoring-01",
+    "jenkins-01",
+    "gitlab-runner-01",
 ]
 
 # Services
@@ -62,24 +105,31 @@ INTERNAL_IP_PREFIXES = ["10.0.", "192.168.1.", "172.16.0."]
 # External IP ranges (simulated)
 EXTERNAL_IP_RANGES = [
     "203.0.113.",  # TEST-NET-3
-    "198.51.100.", # TEST-NET-2
-    "192.0.2.",    # TEST-NET-1
-    "45.33.",      # Random external
-    "104.16.",     # Random external
-    "185.220.100.", # Tor exit node (for attacks)
-    "185.220.101.", # Tor exit node
+    "198.51.100.",  # TEST-NET-2
+    "192.0.2.",  # TEST-NET-1
+    "45.33.",  # Random external
+    "104.16.",  # Random external
+    "185.220.100.",  # Tor exit node (for attacks)
+    "185.220.101.",  # Tor exit node
 ]
 
 # Countries for geo info
 COUNTRIES = {
     "internal": [("US", "San Francisco"), ("US", "New York"), ("US", "Austin")],
     "normal_external": [
-        ("US", "Los Angeles"), ("US", "Chicago"), ("UK", "London"),
-        ("DE", "Berlin"), ("CA", "Toronto"), ("JP", "Tokyo"),
+        ("US", "Los Angeles"),
+        ("US", "Chicago"),
+        ("UK", "London"),
+        ("DE", "Berlin"),
+        ("CA", "Toronto"),
+        ("JP", "Tokyo"),
     ],
     "suspicious": [
-        ("RU", "Moscow"), ("CN", "Beijing"), ("KP", "Pyongyang"),
-        ("IR", "Tehran"), ("BY", "Minsk"),
+        ("RU", "Moscow"),
+        ("CN", "Beijing"),
+        ("KP", "Pyongyang"),
+        ("IR", "Tehran"),
+        ("BY", "Minsk"),
     ],
 }
 
@@ -257,7 +307,17 @@ def generate_normal_event() -> dict[str, Any]:
     user = random.choice(NORMAL_USERS + SERVICE_ACCOUNTS)
     hostname = random.choice(HOSTNAMES)
 
-    event = {
+    actor: dict[str, Any] = {
+        "user": user,
+        "uid": random.randint(1000, 65000),
+        "source_ip": actor_ip,
+    }
+
+    # Add geo info for external IPs
+    if not is_internal:
+        actor["geo"] = _random_geo("normal_external")
+
+    event: dict[str, Any] = {
         "timestamp": _random_timestamp(business_hours=True),
         "source": {
             "type": source_type,
@@ -265,21 +325,13 @@ def generate_normal_event() -> dict[str, Any]:
             "ip": _random_ip(internal=True),
             "service": random.choice(SERVICES[source_type]),
         },
-        "actor": {
-            "user": user,
-            "uid": random.randint(1000, 65000),
-            "source_ip": actor_ip,
-        },
+        "actor": actor,
         "action": {
             "type": action_type,
             "subtype": action_subtype,
             "result": result,
         },
     }
-
-    # Add geo info for external IPs
-    if not is_internal:
-        event["actor"]["geo"] = _random_geo("normal_external")
 
     # Sometimes add context
     if source_type == "system" and random.random() < 0.5:
@@ -331,12 +383,14 @@ def generate_brute_force_event() -> dict[str, Any]:
             "type": "authentication",
             "subtype": "login_failed",
             "result": "failure",
-            "reason": random.choice([
-                "invalid_password",
-                "invalid_credentials",
-                "account_locked",
-                "max_retries_exceeded",
-            ]),
+            "reason": random.choice(
+                [
+                    "invalid_password",
+                    "invalid_credentials",
+                    "account_locked",
+                    "max_retries_exceeded",
+                ]
+            ),
         },
     }
 
@@ -368,7 +422,15 @@ def generate_credential_stuffing_event() -> dict[str, Any]:
     # Mix of success and failure (stuffed creds sometimes work)
     result = "failure" if random.random() < 0.9 else "success"
 
-    event = {
+    action: dict[str, Any] = {
+        "type": "authentication",
+        "subtype": "login_failed" if result == "failure" else "login",
+        "result": result,
+    }
+    if result == "failure":
+        action["reason"] = "invalid_credentials"
+
+    event: dict[str, Any] = {
         "timestamp": _random_timestamp(business_hours=False, night_hours=True),
         "source": {
             "type": "auth",
@@ -381,17 +443,8 @@ def generate_credential_stuffing_event() -> dict[str, Any]:
             "source_ip": actor_ip,
             "geo": _random_geo("suspicious"),
         },
-        "action": {
-            "type": "authentication",
-            "subtype": "login_failed" if result == "failure" else "login",
-            "result": result,
-            "reason": "invalid_credentials" if result == "failure" else None,
-        },
+        "action": action,
     }
-
-    # Remove None values
-    if event["action"]["reason"] is None:
-        del event["action"]["reason"]
 
     return event
 
@@ -429,7 +482,16 @@ def generate_privilege_escalation_event() -> dict[str, Any]:
 
     method, command = random.choice(methods)
 
-    event = {
+    action: dict[str, Any] = {
+        "type": "authorization",
+        "subtype": method,
+        "target": "root" if method in ("sudo", "su") else "/etc/shadow",
+        "result": result,
+    }
+    if result == "failure":
+        action["reason"] = "not in sudoers"
+
+    event: dict[str, Any] = {
         "timestamp": _random_timestamp(business_hours=None),  # Any time
         "source": {
             "type": "system",
@@ -442,13 +504,7 @@ def generate_privilege_escalation_event() -> dict[str, Any]:
             "uid": random.randint(1000, 65000),
             "source_ip": _random_ip(internal=True),
         },
-        "action": {
-            "type": "authorization",
-            "subtype": method,
-            "target": "root" if method in ("sudo", "su") else "/etc/shadow",
-            "result": result,
-            "reason": "not in sudoers" if result == "failure" else None,
-        },
+        "action": action,
         "context": {
             "process": "bash",
             "pid": random.randint(1000, 50000),
@@ -456,10 +512,6 @@ def generate_privilege_escalation_event() -> dict[str, Any]:
             "tty": f"pts/{random.randint(0, 10)}",
         },
     }
-
-    # Remove None values
-    if event["action"]["reason"] is None:
-        del event["action"]["reason"]
 
     return event
 
@@ -499,7 +551,7 @@ def generate_lateral_movement_event() -> dict[str, Any]:
         "actor": {
             "user": user,
             "source_ip": source_ip,
-            "session_id": ''.join(random.choices(string.hexdigits.lower(), k=16)),
+            "session_id": "".join(random.choices(string.hexdigits.lower(), k=16)),
         },
         "action": {
             "type": "network_connection",
@@ -549,7 +601,7 @@ def generate_data_exfiltration_event() -> dict[str, Any]:
         "/data/financial_reports.zip",
     ]
 
-    event = {
+    event: dict[str, Any] = {
         "timestamp": _random_timestamp(night_hours=True),
         "source": {
             "type": "network",
@@ -567,6 +619,8 @@ def generate_data_exfiltration_event() -> dict[str, Any]:
             "target": random.choice(targets),
             "method": random.choice(["https", "scp", "sftp", "ftp"]),
             "result": "success",
+            "bytes_transferred": size_mb * 1024 * 1024,
+            "destination_ip": dest_ip,
         },
         "context": {
             "process": random.choice(["curl", "scp", "rsync", "python"]),
@@ -574,10 +628,6 @@ def generate_data_exfiltration_event() -> dict[str, Any]:
             "command": f"scp {random.choice(targets)} {dest_ip}:/tmp/",
         },
     }
-
-    # Add transfer metadata
-    event["action"]["bytes_transferred"] = size_mb * 1024 * 1024
-    event["action"]["destination_ip"] = dest_ip
 
     return event
 
@@ -602,14 +652,49 @@ def generate_reconnaissance_event() -> dict[str, Any]:
     actor_ip = _random_ip(internal=False, tor=use_tor)
 
     # Common scan targets
-    ports = [21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445,
-             993, 995, 1433, 1521, 3306, 3389, 5432, 5900, 6379, 8080, 8443, 27017]
+    ports = [
+        21,
+        22,
+        23,
+        25,
+        53,
+        80,
+        110,
+        111,
+        135,
+        139,
+        143,
+        443,
+        445,
+        993,
+        995,
+        1433,
+        1521,
+        3306,
+        3389,
+        5432,
+        5900,
+        6379,
+        8080,
+        8443,
+        27017,
+    ]
     target_port = random.choice(ports)
 
     # Most reconnaissance hits closed/filtered ports
     result = "failure" if random.random() < 0.85 else "success"
 
-    event = {
+    action: dict[str, Any] = {
+        "type": "network_connection",
+        "subtype": "port_scan",
+        "target": f":{target_port}",
+        "method": random.choice(["syn_scan", "connect_scan", "fin_scan"]),
+        "result": result,
+    }
+    if result == "failure":
+        action["reason"] = "connection_refused"
+
+    event: dict[str, Any] = {
         "timestamp": _random_timestamp(business_hours=False),
         "source": {
             "type": "network",
@@ -622,19 +707,8 @@ def generate_reconnaissance_event() -> dict[str, Any]:
             "source_ip": actor_ip,
             "geo": _random_geo("suspicious"),
         },
-        "action": {
-            "type": "network_connection",
-            "subtype": "port_scan",
-            "target": f":{target_port}",
-            "method": random.choice(["syn_scan", "connect_scan", "fin_scan"]),
-            "result": result,
-            "reason": "connection_refused" if result == "failure" else None,
-        },
+        "action": action,
     }
-
-    # Remove None values
-    if event["action"]["reason"] is None:
-        del event["action"]["reason"]
 
     return event
 
@@ -657,7 +731,7 @@ class SyntheticEventGenerator:
         >>> print(f"Generated {len(events)} events")
     """
 
-    ATTACK_GENERATORS = {
+    ATTACK_GENERATORS: ClassVar[dict[str, Any]] = {
         "normal": generate_normal_event,
         "brute_force": generate_brute_force_event,
         "credential_stuffing": generate_credential_stuffing_event,
@@ -743,9 +817,9 @@ class SyntheticEventGenerator:
                     labels.append(attack_type)
 
         # Shuffle to mix attack and normal events
-        combined = list(zip(events, labels))
+        combined = list(zip(events, labels, strict=True))
         random.shuffle(combined)
-        events, labels = zip(*combined) if combined else ([], [])
+        events, labels = zip(*combined, strict=True) if combined else ([], [])
 
         logger.info(
             "dataset_generated",
@@ -856,6 +930,7 @@ if __name__ == "__main__":
 
     # Print statistics
     from collections import Counter
+
     label_counts = Counter(labels)
 
     print(f"\nGenerated {len(events)} events:")
@@ -868,4 +943,5 @@ if __name__ == "__main__":
         idx = labels.index(label) if label in labels else 0
         print(f"\n{label.upper()}:")
         import json
+
         print(json.dumps(events[idx], indent=2, default=str))

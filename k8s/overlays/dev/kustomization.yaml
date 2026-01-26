@@ -1,0 +1,78 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: platform
+
+resources:
+  - ../../base
+
+commonLabels:
+  environment: dev
+
+# Image configuration for dev
+images:
+  - name: sentinel-api
+    newName: gcr.io/PROJECT_ID/sentinel-api
+    newTag: dev-latest
+
+# Patches for dev environment
+patches:
+  # Reduce replicas for dev
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: sentinel-api
+        namespace: platform
+      spec:
+        replicas: 1
+  # Reduce HPA for dev
+  - patch: |-
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: sentinel-api
+        namespace: platform
+      spec:
+        minReplicas: 1
+        maxReplicas: 3
+  # Lower resources for dev
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: sentinel-api
+        namespace: platform
+      spec:
+        template:
+          spec:
+            containers:
+              - name: sentinel-api
+                resources:
+                  requests:
+                    cpu: 100m
+                    memory: 128Mi
+                  limits:
+                    cpu: 250m
+                    memory: 256Mi
+
+# ConfigMap patches for dev
+configMapGenerator:
+  - name: sentinel-api-config
+    namespace: platform
+    behavior: merge
+    literals:
+      - ENVIRONMENT=dev
+      - LOG_LEVEL=DEBUG
+      - MODELS_BUCKET=sentinel-models-dev-PROJECT_ID
+      - MODELS_PATH=gs://sentinel-models-dev-PROJECT_ID/
+      - ENABLE_METRICS=true
+      - WORKERS=1
+
+# Secret placeholder (use External Secrets or CSI driver in production)
+secretGenerator:
+  - name: sentinel-api-secrets
+    namespace: platform
+    literals:
+      - jwt-secret=dev-jwt-secret-change-me
+      - api-key=dev-api-key-change-me

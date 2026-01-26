@@ -7,16 +7,8 @@ extraction from security events.
 
 import numpy as np
 import pytest
-from datetime import datetime
 
-from ml.features.pipeline import (
-    FeatureExtractor,
-    SOURCE_TYPE_MAP,
-    ACTION_TYPE_MAP,
-    PRIVATE_RANGES,
-    TOR_EXIT_NODES,
-)
-
+from ml.features.pipeline import FeatureExtractor
 
 # ============================================================================
 # Fixtures
@@ -111,16 +103,12 @@ class TestTransformValidEvent:
         features = extractor.transform(valid_event)
         assert isinstance(features, np.ndarray)
 
-    def test_transform_correct_shape(
-        self, extractor: FeatureExtractor, valid_event: dict
-    ) -> None:
+    def test_transform_correct_shape(self, extractor: FeatureExtractor, valid_event: dict) -> None:
         """Test that transformed features have correct shape."""
         features = extractor.transform(valid_event)
         assert features.shape == (17,)
 
-    def test_transform_correct_dtype(
-        self, extractor: FeatureExtractor, valid_event: dict
-    ) -> None:
+    def test_transform_correct_dtype(self, extractor: FeatureExtractor, valid_event: dict) -> None:
         """Test that features are float32."""
         features = extractor.transform(valid_event)
         assert features.dtype == np.float32
@@ -145,9 +133,7 @@ class TestTransformMinimalEvent:
         features = extractor.transform(minimal_event)
         assert features.shape == (17,)
 
-    def test_transform_missing_optional_fields(
-        self, extractor: FeatureExtractor
-    ) -> None:
+    def test_transform_missing_optional_fields(self, extractor: FeatureExtractor) -> None:
         """Test transform handles missing optional fields."""
         event = {
             "source": {"type": "auth", "hostname": "h", "ip": "10.0.0.1"},
@@ -426,9 +412,7 @@ class TestActionFeatures:
 class TestBatchTransform:
     """Tests for batch transformation."""
 
-    def test_batch_transform_shape(
-        self, extractor: FeatureExtractor, valid_event: dict
-    ) -> None:
+    def test_batch_transform_shape(self, extractor: FeatureExtractor, valid_event: dict) -> None:
         """Test batch transform returns correct shape."""
         events = [valid_event] * 5
         features = extractor.transform_batch(events)
@@ -457,9 +441,7 @@ class TestBatchTransform:
 class TestFeatureImportanceContext:
     """Tests for feature importance context generation."""
 
-    def test_get_feature_importance_context(
-        self, extractor: FeatureExtractor
-    ) -> None:
+    def test_get_feature_importance_context(self, extractor: FeatureExtractor) -> None:
         """Test feature importance context returns descriptions."""
         # Create features that trigger various descriptions
         features = np.zeros(17, dtype=np.float32)

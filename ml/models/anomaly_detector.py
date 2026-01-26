@@ -5,14 +5,13 @@ Detects unusual patterns in security events that may indicate
 malicious activity or novel attack vectors.
 """
 
-import os
 from pathlib import Path
 from typing import Any
 
 import joblib
 import numpy as np
-from sklearn.ensemble import IsolationForest
 import structlog
+from sklearn.ensemble import IsolationForest
 
 logger = structlog.get_logger()
 
@@ -78,13 +77,13 @@ class AnomalyDetector:
         """Check if a trained model is available."""
         return self._is_fitted and self._model is not None
 
-    def fit(self, X: np.ndarray, y: np.ndarray | None = None) -> "AnomalyDetector":
+    def fit(self, X: np.ndarray, _y: np.ndarray | None = None) -> "AnomalyDetector":
         """
         Train the anomaly detector.
 
         Args:
             X: Training data of shape (n_samples, n_features).
-            y: Ignored. Present for API consistency.
+            _y: Ignored. Present for API consistency.
 
         Returns:
             self
@@ -135,6 +134,8 @@ class AnomalyDetector:
         if not self.is_loaded:
             raise RuntimeError("Model not trained or loaded. Call fit() or load() first.")
 
+        assert self._model is not None  # Type narrowing for mypy
+
         # Ensure 2D input
         if X.ndim == 1:
             X = X.reshape(1, -1)
@@ -179,7 +180,8 @@ class AnomalyDetector:
         # Typical score range is approximately [-0.5, 0.5]
         # We use sigmoid-like transformation
         normalized = 1 / (1 + np.exp(raw_scores * 5))
-        return np.clip(normalized, 0, 1)
+        result: np.ndarray = np.clip(normalized, 0, 1)
+        return result
 
     def _calculate_confidence(self, raw_score: float) -> float:
         """

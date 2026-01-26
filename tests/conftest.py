@@ -4,12 +4,14 @@ Pytest configuration and shared fixtures.
 This file contains fixtures that are available to all tests in the test suite.
 """
 
+import asyncio
 import sys
-from pathlib import Path
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import numpy as np
 import pytest
+from jose import jwt
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -26,12 +28,8 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "slow: marks tests as slow (deselect with '-m \"not slow\"')"
     )
-    config.addinivalue_line(
-        "markers", "integration: marks tests as integration tests"
-    )
-    config.addinivalue_line(
-        "markers", "e2e: marks tests as end-to-end tests"
-    )
+    config.addinivalue_line("markers", "integration: marks tests as integration tests")
+    config.addinivalue_line("markers", "e2e: marks tests as end-to-end tests")
 
 
 # ============================================================================
@@ -155,9 +153,13 @@ def sample_feature_batch() -> np.ndarray:
 def sample_labels() -> list[str]:
     """Generate sample labels for training."""
     labels = [
-        "normal", "brute_force", "credential_stuffing",
-        "privilege_escalation", "lateral_movement",
-        "data_exfiltration", "reconnaissance",
+        "normal",
+        "brute_force",
+        "credential_stuffing",
+        "privilege_escalation",
+        "lateral_movement",
+        "data_exfiltration",
+        "reconnaissance",
     ]
     np.random.seed(42)
     return [labels[i % len(labels)] for i in range(100)]
@@ -172,8 +174,6 @@ def jwt_secret() -> str:
 @pytest.fixture
 def valid_jwt_token(jwt_secret: str) -> str:
     """Generate a valid JWT token for testing."""
-    from jose import jwt
-
     payload = {
         "sub": "test_user",
         "exp": datetime.utcnow() + timedelta(hours=1),
@@ -187,8 +187,6 @@ def valid_jwt_token(jwt_secret: str) -> str:
 @pytest.fixture
 def expired_jwt_token(jwt_secret: str) -> str:
     """Generate an expired JWT token for testing."""
-    from jose import jwt
-
     payload = {
         "sub": "test_user",
         "exp": datetime.utcnow() - timedelta(hours=1),
@@ -229,5 +227,4 @@ def mock_env_vars(monkeypatch):
 @pytest.fixture
 def event_loop_policy():
     """Configure event loop for async tests."""
-    import asyncio
     return asyncio.DefaultEventLoopPolicy()

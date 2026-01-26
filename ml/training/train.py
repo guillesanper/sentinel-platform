@@ -11,6 +11,7 @@ Usage:
 """
 
 import json
+import logging
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -34,9 +35,9 @@ from sklearn.model_selection import train_test_split
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from ml.features.pipeline import FeatureExtractor
-from ml.models.anomaly_detector import AnomalyDetector
-from ml.models.classifier import AttackClassifier, ATTACK_TYPES, LABEL_TO_IDX
+from ml.features.pipeline import FeatureExtractor  # noqa: E402
+from ml.models.anomaly_detector import AnomalyDetector  # noqa: E402
+from ml.models.classifier import ATTACK_TYPES, LABEL_TO_IDX, AttackClassifier  # noqa: E402
 
 logger = structlog.get_logger()
 
@@ -81,7 +82,7 @@ def load_or_generate_data(
 
         logger.info("loading_data_from_file", path=str(data_path))
 
-        with open(data_path, "r") as f:
+        with data_path.open() as f:
             data = json.load(f)
 
         # Expected format: {"events": [...], "labels": [...]}
@@ -96,9 +97,7 @@ def load_or_generate_data(
             raise ValueError("Invalid data format. Expected dict or list.")
 
         if len(events) != len(labels):
-            raise ValueError(
-                f"Mismatch: {len(events)} events but {len(labels)} labels"
-            )
+            raise ValueError(f"Mismatch: {len(events)} events but {len(labels)} labels")
 
         logger.info("data_loaded", n_events=len(events))
 
@@ -303,12 +302,12 @@ def evaluate_models(
     # -------------------------------------------------------------------------
 
     # Get predictions for all test samples
-    y_pred = []
+    y_pred_list: list[int] = []
     for i in range(len(X_test)):
         result = classifier.predict(X_test[i])
-        y_pred.append(LABEL_TO_IDX.get(result["attack_type"], 0))
+        y_pred_list.append(LABEL_TO_IDX.get(result["attack_type"], 0))
 
-    y_pred = np.array(y_pred)
+    y_pred = np.array(y_pred_list)
 
     # Calculate classification metrics
     class_accuracy = accuracy_score(y_test, y_pred)
@@ -429,14 +428,14 @@ def log_to_mlflow(
 
         # Log metrics as JSON artifact
         metrics_path = output_dir / "metrics.json"
-        with open(metrics_path, "w") as f:
+        with metrics_path.open("w") as f:
             # Convert numpy types for JSON serialization
             json.dump(metrics, f, indent=2, default=str)
         mlflow.log_artifact(str(metrics_path))
 
         # Log confusion matrix as artifact
         cm_path = output_dir / "confusion_matrix.json"
-        with open(cm_path, "w") as f:
+        with cm_path.open("w") as f:
             json.dump(
                 {
                     "matrix": metrics["classifier"]["confusion_matrix"],
@@ -449,7 +448,7 @@ def log_to_mlflow(
 
         logger.info("mlflow_artifacts_logged", run_id=run_id)
 
-    return run_id
+    return str(run_id)
 
 
 # ============================================================================
@@ -534,7 +533,7 @@ def log_to_mlflow(
     is_flag=True,
     help="Enable verbose output.",
 )
-def main(
+def main(  # noqa: PLR0915
     data_path: str | None,
     output_dir: str,
     n_samples: int,
@@ -568,11 +567,10 @@ def main(
         python -m ml.training.train --n-estimators 200 --max-depth 8
     """
     # Setup logging
-    log_level = "DEBUG" if verbose else "INFO"
+    log_level_name = "DEBUG" if verbose else "INFO"
+    log_level_int: int = getattr(logging, log_level_name, logging.INFO)
     structlog.configure(
-        wrapper_class=structlog.make_filtering_bound_logger(
-            getattr(structlog.stdlib, log_level, structlog.stdlib.INFO)
-        ),
+        wrapper_class=structlog.make_filtering_bound_logger(log_level_int),
     )
 
     logger.info(
@@ -599,18 +597,19 @@ def main(
     )
 
     # Split data
-    X_train_full, X_test, y_train_full, y_test, labels_train_full, labels_test = (
-        train_test_split(
-            X, y, labels,
-            test_size=test_size,
-            random_state=seed,
-            stratify=y,
-        )
+    X_train_full, X_test, y_train_full, y_test, labels_train_full, labels_test = train_test_split(
+        X,
+        y,
+        labels,
+        test_size=test_size,
+        random_state=seed,
+        stratify=y,
     )
 
     # Further split training into train and validation
     X_train, X_val, y_train, y_val = train_test_split(
-        X_train_full, y_train_full,
+        X_train_full,
+        y_train_full,
         test_size=val_size,
         random_state=seed,
         stratify=y_train_full,
@@ -625,6 +624,7 @@ def main(
 
     # Print class distribution
     from collections import Counter
+
     train_dist = Counter([labels[i] for i in range(len(labels)) if i < len(X_train_full)])
     logger.info("class_distribution", distribution=dict(train_dist))
 
@@ -734,7 +734,7 @@ def main(
         )
 
         print(f"MLflow run ID: {run_id}")
-        print(f"View at: mlflow ui")
+        print("View at: mlflow ui")
 
     # -------------------------------------------------------------------------
     # Save Metrics Summary
@@ -764,7 +764,7 @@ def main(
     }
 
     summary_path = output_path / "training_summary.json"
-    with open(summary_path, "w") as f:
+    with summary_path.open("w") as f:
         json.dump(summary, f, indent=2, default=str)
 
     print(f"\nTraining summary saved to: {summary_path}")

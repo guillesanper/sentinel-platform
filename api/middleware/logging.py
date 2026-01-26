@@ -8,10 +8,10 @@ and human-readable output for development.
 import logging
 import os
 import sys
-from typing import Any
+from typing import Any, cast
 
 import structlog
-from structlog.types import EventDict, Processor
+from structlog.types import BindableLogger, EventDict, Processor
 
 
 def add_severity_level(
@@ -166,7 +166,7 @@ def get_request_logger(
     request_id: str | None = None,
     user_id: str | None = None,
     **extra: Any,
-) -> structlog.stdlib.BoundLogger:
+) -> BindableLogger:
     """
     Get a logger with request context bound.
 
@@ -191,7 +191,7 @@ def get_request_logger(
         context["user_id"] = user_id
     context.update(extra)
 
-    return logger.bind(**context)
+    return cast(BindableLogger, logger.bind(**context))
 
 
 class LoggingMiddleware:

@@ -1,0 +1,112 @@
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: sentinel-recording
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: sentinel-api
+    app.kubernetes.io/component: recording
+    app.kubernetes.io/part-of: sentinel
+    prometheus: sentinel-prometheus
+    role: recording-rules
+spec:
+  groups:
+    - name: sentinel-api-recording
+      interval: 30s
+      rules:
+        # Request rate by status
+        - record: sentinel:request_rate:by_status
+          expr: |
+            sum(rate(sentinel_request_total[5m])) by (status)
+
+        # Request rate by endpoint
+        - record: sentinel:request_rate:by_endpoint
+          expr: |
+            sum(rate(sentinel_request_total[5m])) by (endpoint)
+
+        # Total request rate
+        - record: sentinel:request_rate:total
+          expr: |
+            sum(rate(sentinel_request_total[5m]))
+
+        # Error rate percentage
+        - record: sentinel:error_rate:percentage
+          expr: |
+            100 * (
+              sum(rate(sentinel_request_total{status=~"5.."}[5m]))
+              /
+              sum(rate(sentinel_request_total[5m]))
+            )
+
+        # Latency percentiles
+        - record: sentinel:latency:p50
+          expr: |
+            histogram_quantile(0.50, sum(rate(sentinel_request_duration_seconds_bucket[5m])) by (le))
+
+        - record: sentinel:latency:p90
+          expr: |
+            histogram_quantile(0.90, sum(rate(sentinel_request_duration_seconds_bucket[5m])) by (le))
+
+        - record: sentinel:latency:p99
+          expr: |
+            histogram_quantile(0.99, sum(rate(sentinel_request_duration_seconds_bucket[5m])) by (le))
+
+        # Latency by endpoint
+        - record: sentinel:latency:p99:by_endpoint
+          expr: |
+            histogram_quantile(0.99, sum(rate(sentinel_request_duration_seconds_bucket[5m])) by (le, endpoint))
+
+        # Prediction score distribution
+        - record: sentinel:prediction_score:by_severity
+          expr: |
+            sum(rate(sentinel_prediction_score[5m])) by (severity)
+
+        # Attack type counts
+        - record: sentinel:attack_type:rate
+          expr: |
+            sum(rate(sentinel_attack_type_total[5m])) by (attack_type)
+
+        # Total threats detected per minute
+        - record: sentinel:threats:per_minute
+          expr: |
+            sum(increase(sentinel_attack_type_total[1m]))
+
+        # Availability (successful requests / total requests)
+        - record: sentinel:availability:percentage
+          expr: |
+            100 * (
+              sum(rate(sentinel_request_total{status=~"2.."}[5m]))
+              /
+              sum(rate(sentinel_request_total[5m]))
+            )
+
+        # Pod CPU usage percentage
+        - record: sentinel:pod_cpu:percentage
+          expr: |
+            100 * (
+              sum(rate(container_cpu_usage_seconds_total{namespace="platform", pod=~"sentinel-.*"}[5m])) by (pod)
+              /
+              sum(kube_pod_container_resource_limits{namespace="platform", pod=~"sentinel-.*", resource="cpu"}) by (pod)
+            )
+
+        # Pod memory usage percentage
+        - record: sentinel:pod_memory:percentage
+          expr: |
+            100 * (
+              sum(container_memory_working_set_bytes{namespace="platform", pod=~"sentinel-.*"}) by (pod)
+              /
+              sum(kube_pod_container_resource_limits{namespace="platform", pod=~"sentinel-.*", resource="memory"}) by (pod)
+            )
+
+        # Available replicas
+        - record: sentinel:replicas:available
+          expr: |
+            kube_deployment_status_replicas_available{namespace="platform", deployment="sentinel-api"}
+
+        # Model inference time (if exposed)
+        - record: sentinel:inference_time:avg
+          expr: |
+            rate(sentinel_request_duration_seconds_sum{endpoint="/v1/predict"}[5m])
+            /
+            rate(sentinel_request_duration_seconds_count{endpoint="/v1/predict"}[5m])
