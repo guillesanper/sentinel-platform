@@ -172,6 +172,7 @@ omit = [
     "*/tests/*",
     "*/__init__.py",
     "*/conftest.py",
+    "ml/training/train.py",  # Training code tested via integration/manual validation
 ]
 
 [tool.coverage.report]
