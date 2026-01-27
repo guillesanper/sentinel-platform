@@ -66,6 +66,7 @@ class AttackClassifier:
         learning_rate: float = 0.1,
         random_state: int = 42,
         model_path: Path | str | None = None,
+        class_weight: str | None = "balanced",
     ) -> None:
         """
         Initialize the attack classifier.
@@ -76,12 +77,15 @@ class AttackClassifier:
             learning_rate: Boosting learning rate.
             random_state: Random seed for reproducibility.
             model_path: Path for saving/loading the model.
+            class_weight: Strategy for class weighting. 'balanced' computes weights
+                inversely proportional to class frequencies. None disables weighting.
         """
         self.n_estimators = n_estimators
         self.max_depth = max_depth
         self.learning_rate = learning_rate
         self.random_state = random_state
         self.model_path = Path(model_path) if model_path else DEFAULT_MODEL_PATH
+        self.class_weight = class_weight
 
         self._model: xgb.XGBClassifier | None = None
         self._is_fitted = False
@@ -92,6 +96,7 @@ class AttackClassifier:
             n_estimators=n_estimators,
             max_depth=max_depth,
             n_classes=len(ATTACK_TYPES),
+            class_weight=class_weight,
         )
 
     @property
@@ -177,6 +182,18 @@ class AttackClassifier:
             ]
             fit_params["eval_set"] = encoded_eval_set
             fit_params["verbose"] = False
+
+        # Calculate sample weights for class balancing
+        if self.class_weight == "balanced":
+            from sklearn.utils.class_weight import compute_sample_weight
+
+            sample_weight = compute_sample_weight("balanced", y_encoded)
+            fit_params["sample_weight"] = sample_weight
+            logger.info(
+                "class_weighting_applied",
+                strategy=self.class_weight,
+                weight_range=(float(sample_weight.min()), float(sample_weight.max())),
+            )
 
         self._model.fit(X, y_encoded, **fit_params)
         self._is_fitted = True

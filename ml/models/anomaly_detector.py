@@ -142,7 +142,10 @@ class AnomalyDetector:
 
         # Get raw decision scores
         raw_scores = self._model.decision_function(X)
-        predictions = self._model.predict(X)  # 1 = normal, -1 = anomaly
+
+        # Use optimized threshold instead of model's default predict
+        # Lower scores = more anomalous in Isolation Forest
+        predictions = np.where(raw_scores < self._threshold, -1, 1)
 
         # Normalize scores to [0, 1] where 1 = most anomalous
         # Isolation Forest: lower scores = more anomalous
@@ -263,3 +266,70 @@ class AnomalyDetector:
             "is_fitted": self._is_fitted,
             "threshold": self._threshold,
         }
+
+    def optimize_threshold_for_recall(
+        self,
+        X_val: np.ndarray,
+        y_val: np.ndarray,
+        target_recall: float = 0.8,
+    ) -> float:
+        """
+        Optimize threshold to achieve target recall for anomaly detection.
+
+        For security systems, high recall is critical - we prefer false positives
+        over missing actual attacks.
+
+        Args:
+            X_val: Validation features.
+            y_val: Validation labels (0=normal, 1=anomaly/attack).
+            target_recall: Minimum recall to achieve (default 0.8 = 80%).
+
+        Returns:
+            Optimized threshold value.
+        """
+        if not self.is_loaded:
+            raise RuntimeError("Model not trained. Call fit() first.")
+
+        assert self._model is not None
+
+        from sklearn.metrics import precision_recall_curve
+
+        # Get raw decision scores (lower = more anomalous in Isolation Forest)
+        raw_scores = self._model.decision_function(X_val)
+
+        # Invert scores so higher = more anomalous (for precision_recall_curve)
+        anomaly_scores = -raw_scores
+
+        # Calculate precision-recall curve
+        precisions, recalls, thresholds = precision_recall_curve(y_val, anomaly_scores)
+
+        # Find threshold that achieves target recall with best precision
+        valid_indices = np.where(recalls[:-1] >= target_recall)[0]
+
+        if len(valid_indices) == 0:
+            # Target recall not achievable, use threshold with max recall
+            logger.warning(
+                "target_recall_not_achievable",
+                target=target_recall,
+                max_recall=float(recalls.max()),
+            )
+            optimal_idx = np.argmax(recalls[:-1])
+        else:
+            # Among thresholds meeting target recall, pick highest precision
+            precision_at_valid = precisions[:-1][valid_indices]
+            optimal_idx = valid_indices[np.argmax(precision_at_valid)]
+
+        # Convert back to original score space (negate again)
+        optimal_threshold = -thresholds[optimal_idx]
+
+        logger.info(
+            "threshold_optimized",
+            original_threshold=float(self._threshold),
+            optimal_threshold=float(optimal_threshold),
+            recall_at_threshold=float(recalls[optimal_idx]),
+            precision_at_threshold=float(precisions[optimal_idx]),
+            target_recall=target_recall,
+        )
+
+        self._threshold = optimal_threshold
+        return float(optimal_threshold)

@@ -307,6 +307,7 @@ def train_classifier(
     max_depth: int = 6,
     learning_rate: float = 0.1,
     random_state: int = 42,
+    class_weight: str | None = "balanced",
 ) -> AttackClassifier:
     """
     Train the attack classification model.
@@ -320,6 +321,7 @@ def train_classifier(
         max_depth: Maximum tree depth.
         learning_rate: Boosting learning rate.
         random_state: Random seed for reproducibility.
+        class_weight: Class weighting strategy ('balanced' or None).
 
     Returns:
         Trained AttackClassifier instance.
@@ -329,6 +331,7 @@ def train_classifier(
         n_samples=X_train.shape[0],
         n_estimators=n_estimators,
         max_depth=max_depth,
+        class_weight=class_weight,
     )
 
     classifier = AttackClassifier(
@@ -336,6 +339,7 @@ def train_classifier(
         max_depth=max_depth,
         learning_rate=learning_rate,
         random_state=random_state,
+        class_weight=class_weight,
     )
 
     # Set up validation set if provided
@@ -630,9 +634,9 @@ def log_to_mlflow(
 )
 @click.option(
     "--contamination",
-    type=float,
-    default=0.1,
-    help="Expected proportion of outliers for anomaly detector.",
+    type=str,
+    default="auto",
+    help="Proportion of outliers. Use 'auto' to calculate from attack-ratio.",
 )
 @click.option(
     "--n-estimators",
@@ -651,6 +655,23 @@ def log_to_mlflow(
     type=float,
     default=0.1,
     help="Learning rate for XGBoost classifier.",
+)
+@click.option(
+    "--class-weight",
+    type=click.Choice(["balanced", "none"]),
+    default="balanced",
+    help="Class weighting strategy: 'balanced' (recommended) or 'none'.",
+)
+@click.option(
+    "--optimize-threshold/--no-optimize-threshold",
+    default=True,
+    help="Optimize anomaly threshold for target recall.",
+)
+@click.option(
+    "--target-recall",
+    type=float,
+    default=0.8,
+    help="Target recall for anomaly detection (0.8 = detect 80%% of attacks).",
 )
 @click.option(
     "--seed",
@@ -677,10 +698,13 @@ def main(  # noqa: PLR0915
     attack_ratio: float,
     test_size: float,
     val_size: float,
-    contamination: float,
+    contamination: str,
     n_estimators: int,
     max_depth: int,
     learning_rate: float,
+    class_weight: str,
+    optimize_threshold: bool,
+    target_recall: float,
     seed: int,
     mlflow: bool,
     verbose: bool,
@@ -774,6 +798,17 @@ def main(  # noqa: PLR0915
     train_dist = Counter([labels[i] for i in range(len(labels)) if i < len(X_train_full)])
     logger.info("class_distribution", distribution=dict(train_dist))
 
+    # Calculate actual contamination (proportion of attacks in data)
+    if contamination == "auto":
+        actual_contamination = attack_ratio
+        logger.info(
+            "auto_contamination_calculated",
+            attack_ratio=attack_ratio,
+            actual_contamination=actual_contamination,
+        )
+    else:
+        actual_contamination = float(contamination)
+
     # -------------------------------------------------------------------------
     # Train Models
     # -------------------------------------------------------------------------
@@ -784,10 +819,27 @@ def main(  # noqa: PLR0915
 
     detector = train_anomaly_detector(
         X_train=X_train,
-        contamination=contamination,
+        contamination=actual_contamination,
         n_estimators=n_estimators,
         random_state=seed,
     )
+
+    # Optimize threshold for target recall
+    if optimize_threshold:
+        print(f"Optimizing threshold for {target_recall:.0%} recall...")
+        # Create binary labels for anomaly detection (0=normal, 1=attack)
+        y_val_binary = np.array([0 if label == "normal" else 1 for label in labels_train_full])
+        # Use validation set indices
+        val_start = len(X_train)
+        val_end = val_start + len(X_val)
+        y_val_anomaly = y_val_binary[val_start:val_end]
+
+        detector.optimize_threshold_for_recall(
+            X_val=X_val,
+            y_val=y_val_anomaly,
+            target_recall=target_recall,
+        )
+        print(f"Threshold optimized: {detector._threshold:.4f}")
 
     # Save anomaly detector
     detector_path = output_path / "anomaly_detector.joblib"
@@ -807,6 +859,7 @@ def main(  # noqa: PLR0915
         max_depth=max_depth,
         learning_rate=learning_rate,
         random_state=seed,
+        class_weight=class_weight if class_weight != "none" else None,
     )
 
     # Save classifier
@@ -870,7 +923,7 @@ def main(  # noqa: PLR0915
             "attack_ratio": attack_ratio,
             "test_size": test_size,
             "val_size": val_size,
-            "contamination": contamination,
+            "contamination": actual_contamination,
             "n_estimators": n_estimators,
             "max_depth": max_depth,
             "learning_rate": learning_rate,
@@ -912,7 +965,7 @@ def main(  # noqa: PLR0915
             "test_size": len(X_test),
         },
         "parameters": {
-            "contamination": contamination,
+            "contamination": actual_contamination,
             "n_estimators": n_estimators,
             "max_depth": max_depth,
             "learning_rate": learning_rate,
