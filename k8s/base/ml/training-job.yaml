@@ -111,9 +111,9 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
 data:
   ENVIRONMENT: "dev"
-  MODELS_BUCKET: "sentinel-models-dev-PROJECT_ID"
+  MODELS_BUCKET: "sentinel-models-${ENVIRONMENT}-${PROJECT_ID}"
   MLFLOW_TRACKING_URI: "http://mlflow.ml.svc.cluster.local:5000"
-  DATA_PATH: "gs://sentinel-data-dev-PROJECT_ID/training/"
+  DATA_PATH: "gs://sentinel-data-${ENVIRONMENT}-${PROJECT_ID}/training/"
 ---
 apiVersion: v1
 kind: ConfigMap

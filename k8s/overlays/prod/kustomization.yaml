@@ -12,7 +12,7 @@ commonLabels:
 # Image configuration for prod
 images:
   - name: sentinel-api
-    newName: gcr.io/PROJECT_ID/sentinel-api
+    newName: gcr.io/${PROJECT_ID}/sentinel-api
     # Use specific version tags in production, not 'latest'
     newTag: v1.0.0
 
@@ -73,7 +73,7 @@ patches:
         name: sentinel-api
         namespace: platform
         annotations:
-          iam.gke.io/gcp-service-account: sentinel-api-prod@PROJECT_ID.iam.gserviceaccount.com
+          iam.gke.io/gcp-service-account: sentinel-api-prod@${PROJECT_ID}.iam.gserviceaccount.com
 
 # ConfigMap patches for prod
 configMapGenerator:
@@ -84,8 +84,8 @@ configMapGenerator:
       - ENVIRONMENT=prod
       - LOG_LEVEL=INFO
       - LOG_FORMAT=json
-      - MODELS_BUCKET=sentinel-models-prod-PROJECT_ID
-      - MODELS_PATH=gs://sentinel-models-prod-PROJECT_ID/
+      - MODELS_BUCKET=sentinel-models-prod-${PROJECT_ID}
+      - MODELS_PATH=gs://sentinel-models-prod-${PROJECT_ID}/
       - ENABLE_METRICS=true
       - WORKERS=4
 

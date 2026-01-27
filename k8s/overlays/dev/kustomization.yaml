@@ -12,7 +12,7 @@ commonLabels:
 # Image configuration for dev
 images:
   - name: sentinel-api
-    newName: gcr.io/PROJECT_ID/sentinel-api
+    newName: gcr.io/${PROJECT_ID}/sentinel-api
     newTag: dev-latest
 
 # Patches for dev environment
@@ -64,8 +64,8 @@ configMapGenerator:
     literals:
       - ENVIRONMENT=dev
       - LOG_LEVEL=DEBUG
-      - MODELS_BUCKET=sentinel-models-dev-PROJECT_ID
-      - MODELS_PATH=gs://sentinel-models-dev-PROJECT_ID/
+      - MODELS_BUCKET=sentinel-models-dev-${PROJECT_ID}
+      - MODELS_PATH=gs://sentinel-models-dev-${PROJECT_ID}/
       - ENABLE_METRICS=true
       - WORKERS=1
 

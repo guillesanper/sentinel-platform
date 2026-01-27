@@ -130,18 +130,43 @@ class AttackClassifier:
         # Convert string labels to indices if needed
         y_encoded = self._encode_labels(y)
 
+        # Detect number of classes from data
+        n_classes = len(np.unique(y_encoded))
+        self._n_classes = n_classes
+
+        # Use binary or multi-class objective based on number of classes
+        if n_classes == 2:
+            objective = "binary:logistic"
+            eval_metric = "logloss"
+            model_params = {
+                "n_estimators": self.n_estimators,
+                "max_depth": self.max_depth,
+                "learning_rate": self.learning_rate,
+                "random_state": self.random_state,
+                "objective": objective,
+                "use_label_encoder": False,
+                "eval_metric": eval_metric,
+                "n_jobs": -1,
+            }
+        else:
+            objective = "multi:softprob"
+            eval_metric = "mlogloss"
+            model_params = {
+                "n_estimators": self.n_estimators,
+                "max_depth": self.max_depth,
+                "learning_rate": self.learning_rate,
+                "random_state": self.random_state,
+                "objective": objective,
+                "num_class": n_classes,
+                "use_label_encoder": False,
+                "eval_metric": eval_metric,
+                "n_jobs": -1,
+            }
+
+        logger.info("classifier_config", n_classes=n_classes, objective=objective)
+
         # Initialize model
-        self._model = xgb.XGBClassifier(
-            n_estimators=self.n_estimators,
-            max_depth=self.max_depth,
-            learning_rate=self.learning_rate,
-            random_state=self.random_state,
-            objective="multi:softprob",
-            num_class=len(ATTACK_TYPES),
-            use_label_encoder=False,
-            eval_metric="mlogloss",
-            n_jobs=-1,
-        )
+        self._model = xgb.XGBClassifier(**model_params)
 
         # Fit with optional early stopping
         fit_params: dict[str, Any] = {}
@@ -192,28 +217,40 @@ class AttackClassifier:
         predictions = self._model.predict(X)
         probabilities = self._model.predict_proba(X)
 
+        # Get number of classes from model
+        n_classes = getattr(self, "_n_classes", len(ATTACK_TYPES))
+
         # For single sample
         if len(X) == 1:
-            pred_idx = int(predictions[0])
+            pred_idx = int(np.asarray(predictions).flatten()[0])
             probs = probabilities[0]
+
+            # Build probabilities dict only for classes in model
+            prob_dict = {}
+            for idx in range(n_classes):
+                if idx < len(probs):
+                    prob_dict[IDX_TO_LABEL[idx]] = float(probs[idx])
 
             return {
                 "attack_type": IDX_TO_LABEL[pred_idx],
-                "confidence": float(probs[pred_idx]),
-                "probabilities": {label: float(probs[idx]) for label, idx in LABEL_TO_IDX.items()},
+                "confidence": float(probs[pred_idx]) if pred_idx < len(probs) else 0.0,
+                "probabilities": prob_dict,
             }
 
         # For batch
         results = []
         for pred, probs in zip(predictions, probabilities, strict=True):
-            idx = int(pred)
+            idx = int(np.asarray(pred).flatten()[0]) if hasattr(pred, "__len__") else int(pred)
+            prob_dict = {}
+            for class_idx in range(n_classes):
+                if class_idx < len(probs):
+                    prob_dict[IDX_TO_LABEL[class_idx]] = float(probs[class_idx])
+
             results.append(
                 {
                     "attack_type": IDX_TO_LABEL[idx],
-                    "confidence": float(probs[idx]),
-                    "probabilities": {
-                        label: float(probs[idx]) for label, idx in LABEL_TO_IDX.items()
-                    },
+                    "confidence": float(probs[idx]) if idx < len(probs) else 0.0,
+                    "probabilities": prob_dict,
                 }
             )
 
@@ -289,6 +326,7 @@ class AttackClassifier:
         model_data = {
             "model": self._model,
             "classes": self._classes,
+            "n_classes": getattr(self, "_n_classes", len(ATTACK_TYPES)),
             "n_estimators": self.n_estimators,
             "max_depth": self.max_depth,
             "learning_rate": self.learning_rate,
@@ -320,6 +358,7 @@ class AttackClassifier:
 
         self._model = model_data["model"]
         self._classes = model_data.get("classes", ATTACK_TYPES)
+        self._n_classes = model_data.get("n_classes", len(ATTACK_TYPES))
         self._is_fitted = True
 
         logger.info("attack_classifier_loaded", path=str(load_path))
