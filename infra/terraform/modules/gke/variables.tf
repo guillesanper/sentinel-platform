@@ -276,7 +276,7 @@ variable "maintenance_end_time" {
 variable "maintenance_recurrence" {
   description = "Recurrence rule for maintenance window"
   type        = string
-  default     = "FREQ=WEEKLY;BYDAY=SA,SU"
+  default     = "FREQ=DAILY"
 }
 
 variable "enable_vertical_pod_autoscaling" {

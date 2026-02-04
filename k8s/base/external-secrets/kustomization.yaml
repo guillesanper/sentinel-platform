@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# External Secrets are managed by Terraform (infra/terraform/modules/kubernetes)
+# This directory is for documentation and optional manual overrides only
+#
+# Terraform creates:
+# - ClusterSecretStore (gcp-secret-manager)
+# - ExternalSecret in platform namespace (sentinel-secrets)
+# - ExternalSecret in ml namespace (sentinel-secrets)
+#
+# The synced K8s secrets contain:
+# - jwt-secret: JWT signing key from GCP Secret Manager
+# - api-key: API authentication key from GCP Secret Manager
+#
+# To verify:
+#   kubectl get clustersecretstore
+#   kubectl get externalsecrets -A
+#   kubectl get secrets sentinel-secrets -n platform
+
+resources: []

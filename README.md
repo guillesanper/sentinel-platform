@@ -135,9 +135,20 @@ terraform apply
 # Get credentials
 gcloud container clusters get-credentials sentinel-cluster --region europe-west1
 
+# Configure secrets in GCP Secret Manager
+export PROJECT_ID=your-project-id
+echo -n "your-jwt-secret" | gcloud secrets versions add jwt-secret-dev --data-file=-
+echo -n "your-api-key" | gcloud secrets versions add api-key-dev --data-file=-
+
+# Update PROJECT_ID in overlays
+sed -i "s/PROJECT_ID/${PROJECT_ID}/g" k8s/overlays/dev/kustomization.yaml
+
 # Deploy
-kubectl apply -k k8s/overlays/dev
+./scripts/deploy-k8s.sh dev
 ```
+
+> **Nota**: Los secrets se gestionan automáticamente mediante External Secrets Operator (ESO),
+> que sincroniza desde GCP Secret Manager. Ver [Guia de Deployment](./docs/DEPLOYMENT.md) para mas detalles.
 
 ### 5. Run Locally (Development)
 
@@ -225,6 +236,10 @@ kubectl port-forward svc/grafana 3000:3000 -n sentinel-observability
 
 ## 📖 Documentation
 
+- [Guia de Deployment](./docs/DEPLOYMENT.md) - Proceso completo de despliegue
+- [Guia de Migracion](./docs/MIGRATION_GUIDE.md) - Migracion desde deploy.sh
+- [Troubleshooting de Secrets](./docs/SECRETS_TROUBLESHOOTING.md) - Problemas con ESO
+- [Modulo Kubernetes Terraform](./infra/terraform/modules/kubernetes/README.md) - Configuracion de ESO
 - [Technical Design Document](./docs/SENTINEL_TECHNICAL_DESIGN.md)
 - [Architecture Decisions](./docs/adr/)
 - [Runbooks](./docs/runbooks/)

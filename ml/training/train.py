@@ -20,6 +20,7 @@ from typing import Any
 import click
 import mlflow
 import numpy as np
+import pandas as pd
 import structlog
 from sklearn.metrics import (
     accuracy_score,
@@ -35,11 +36,44 @@ from sklearn.model_selection import train_test_split
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from ml.features.pipeline import FeatureExtractor  # noqa: E402
+from ml.features.pipeline import CombinedFeatureExtractor, FeatureExtractor  # noqa: E402
 from ml.models.anomaly_detector import AnomalyDetector  # noqa: E402
 from ml.models.classifier import ATTACK_TYPES, LABEL_TO_IDX, AttackClassifier  # noqa: E402
 
 logger = structlog.get_logger()
+
+# Binary classification labels (normal vs attack)
+BINARY_ATTACK_TYPES = ["normal", "brute_force"]
+
+
+def _infer_attack_type(row: pd.Series) -> str:
+    """
+    Infer attack type from row features using heuristics.
+
+    Args:
+        row: A pandas Series containing the row data.
+
+    Returns:
+        The inferred attack type string.
+    """
+    if row["attack_detected"] == 0:
+        return "normal"
+
+    # Determine attack type based on feature patterns
+    if row["failed_logins"] >= 3 and row["login_attempts"] >= 5:
+        attack_type = "brute_force"
+    elif row["failed_logins"] >= 2 and row["ip_reputation_score"] < 0.3:
+        attack_type = "credential_stuffing"
+    elif row["unusual_time_access"] == 1 and row["session_duration"] > 600:
+        attack_type = "lateral_movement"
+    elif row["network_packet_size"] > 700 and row["session_duration"] > 500:
+        attack_type = "data_exfiltration"
+    elif row["protocol_type"] == "ICMP" or row["session_duration"] < 60:
+        attack_type = "reconnaissance"
+    else:
+        attack_type = "privilege_escalation"
+
+    return attack_type
 
 
 # ============================================================================
@@ -138,6 +172,150 @@ def load_or_generate_data(
     return X, y, labels
 
 
+def load_kaggle_csv(
+    csv_path: str | Path,
+    binary: bool = False,
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """
+    Load data directly from Kaggle CSV with pre-computed features.
+
+    The CSV is expected to have columns: session_id, network_packet_size,
+    protocol_type, login_attempts, session_duration, encryption_used,
+    ip_reputation_score, failed_logins, browser_type, unusual_time_access,
+    attack_detected.
+
+    Args:
+        csv_path: Path to the Kaggle CSV file.
+        binary: If True, use binary classification (normal vs attack).
+                If False, infer attack types using heuristics.
+
+    Returns:
+        Tuple of (X, y, labels) where:
+        - X: Feature matrix of shape (n_samples, n_features)
+        - y: Encoded labels of shape (n_samples,)
+        - labels: String labels list
+
+    Raises:
+        FileNotFoundError: If csv_path doesn't exist.
+    """
+    csv_path = Path(csv_path)
+    if not csv_path.exists():
+        raise FileNotFoundError(f"CSV file not found: {csv_path}")
+
+    logger.info("loading_kaggle_csv", path=str(csv_path))
+
+    df = pd.read_csv(csv_path)
+    logger.info("csv_loaded", n_rows=len(df), columns=list(df.columns))
+
+    # Encode categorical columns
+    protocol_map = {"TCP": 0, "UDP": 1, "ICMP": 2}
+    encryption_map = {"None": 0, "DES": 1, "AES": 2}
+    browser_map = {"Unknown": 0, "Chrome": 1, "Firefox": 2, "Edge": 3, "Safari": 4}
+
+    df["protocol_encoded"] = df["protocol_type"].map(protocol_map).fillna(0).astype(int)
+    df["encryption_encoded"] = df["encryption_used"].map(encryption_map).fillna(0).astype(int)
+    df["browser_encoded"] = df["browser_type"].map(browser_map).fillna(0).astype(int)
+
+    # Select feature columns (numeric + encoded categoricals)
+    feature_cols = [
+        "network_packet_size",
+        "login_attempts",
+        "session_duration",
+        "ip_reputation_score",
+        "failed_logins",
+        "unusual_time_access",
+        "protocol_encoded",
+        "encryption_encoded",
+        "browser_encoded",
+    ]
+
+    X = df[feature_cols].values.astype(np.float32)
+
+    # Assign labels based on attack_detected column
+    if binary:
+        # Binary classification: normal (0) vs brute_force (1) as generic "attack"
+        labels = [
+            "normal" if row["attack_detected"] == 0 else "brute_force" for _, row in df.iterrows()
+        ]
+    else:
+        # Multi-class: infer attack types from features (heuristics)
+        labels = [_infer_attack_type(row) for _, row in df.iterrows()]
+
+    # Encode labels to integers
+    y = np.array([LABEL_TO_IDX.get(label, 0) for label in labels], dtype=np.int32)
+
+    logger.info(
+        "kaggle_data_prepared",
+        X_shape=X.shape,
+        y_shape=y.shape,
+        label_distribution={k: labels.count(k) for k in set(labels)},
+    )
+
+    return X, y, labels
+
+
+def load_or_generate_data_with_campaigns(
+    n_samples: int = 10000,
+    attack_ratio: float = 0.3,
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """
+    Generate synthetic data with campaigns and extract combined features.
+
+    Uses CombinedFeatureExtractor (17 event + 8 window = 25 features) to
+    properly capture attack patterns that differ by user cardinality:
+    - brute_force: same user, same IP
+    - credential_stuffing: multiple users, same IP
+
+    Args:
+        n_samples: Approximate number of events to generate.
+        attack_ratio: Ratio of attack campaigns.
+        seed: Random seed for reproducibility.
+
+    Returns:
+        Tuple of (X, y, labels) where:
+        - X: Feature matrix of shape (n_campaigns, 25)
+        - y: Encoded labels of shape (n_campaigns,)
+        - labels: String labels list (one per campaign)
+    """
+    from data.generators.synthetic import SyntheticEventGenerator
+
+    logger.info(
+        "generating_campaign_data",
+        n_samples=n_samples,
+        attack_ratio=attack_ratio,
+        seed=seed,
+    )
+
+    generator = SyntheticEventGenerator(seed=seed)
+    event_groups, labels, campaign_ids = generator.generate_dataset_with_campaigns(
+        n_samples=n_samples,
+        attack_ratio=attack_ratio,
+    )
+
+    logger.info(
+        "campaigns_generated",
+        n_campaigns=len(event_groups),
+        total_events=sum(len(g) for g in event_groups),
+    )
+
+    # Extract combined features (17 event + 8 window = 25 total)
+    extractor = CombinedFeatureExtractor()
+    X = extractor.transform_batch_groups(event_groups)
+
+    # Encode labels
+    y = np.array([LABEL_TO_IDX.get(label, 0) for label in labels], dtype=np.int32)
+
+    logger.info(
+        "campaign_features_extracted",
+        X_shape=X.shape,
+        y_shape=y.shape,
+        n_features=X.shape[1],
+    )
+
+    return X, y, labels
+
+
 # ============================================================================
 # Model Training
 # ============================================================================
@@ -190,6 +368,7 @@ def train_classifier(
     max_depth: int = 6,
     learning_rate: float = 0.1,
     random_state: int = 42,
+    class_weight: str | None = "balanced",
 ) -> AttackClassifier:
     """
     Train the attack classification model.
@@ -203,6 +382,7 @@ def train_classifier(
         max_depth: Maximum tree depth.
         learning_rate: Boosting learning rate.
         random_state: Random seed for reproducibility.
+        class_weight: Class weighting strategy ('balanced' or None).
 
     Returns:
         Trained AttackClassifier instance.
@@ -212,6 +392,7 @@ def train_classifier(
         n_samples=X_train.shape[0],
         n_estimators=n_estimators,
         max_depth=max_depth,
+        class_weight=class_weight,
     )
 
     classifier = AttackClassifier(
@@ -219,6 +400,7 @@ def train_classifier(
         max_depth=max_depth,
         learning_rate=learning_rate,
         random_state=random_state,
+        class_weight=class_weight,
     )
 
     # Set up validation set if provided
@@ -244,6 +426,7 @@ def evaluate_models(
     X_test: np.ndarray,
     y_test: np.ndarray,
     labels_test: list[str],
+    binary: bool = False,
 ) -> dict[str, Any]:
     """
     Evaluate trained models on test data.
@@ -254,6 +437,7 @@ def evaluate_models(
         X_test: Test features.
         y_test: Test labels (encoded).
         labels_test: Test labels (strings).
+        binary: If True, use binary classification labels.
 
     Returns:
         Dictionary with evaluation metrics.
@@ -316,10 +500,11 @@ def evaluate_models(
     class_f1 = f1_score(y_test, y_pred, average="weighted", zero_division=0)
 
     # Per-class metrics
+    target_names = BINARY_ATTACK_TYPES if binary else ATTACK_TYPES
     class_report = classification_report(
         y_test,
         y_pred,
-        target_names=ATTACK_TYPES,
+        target_names=target_names,
         output_dict=True,
         zero_division=0,
     )
@@ -349,7 +534,7 @@ def evaluate_models(
     # -------------------------------------------------------------------------
 
     per_attack_metrics = {}
-    for attack_type in ATTACK_TYPES:
+    for attack_type in target_names:
         if attack_type in class_report:
             per_attack_metrics[attack_type] = {
                 "precision": class_report[attack_type]["precision"],
@@ -374,6 +559,7 @@ def log_to_mlflow(
     classifier: AttackClassifier,
     params: dict[str, Any],
     output_dir: Path,
+    binary: bool = False,
 ) -> str:
     """
     Log training results to MLflow.
@@ -384,6 +570,7 @@ def log_to_mlflow(
         classifier: Trained attack classifier.
         params: Training parameters.
         output_dir: Directory where models are saved.
+        binary: If True, use binary classification labels.
 
     Returns:
         MLflow run ID.
@@ -435,11 +622,12 @@ def log_to_mlflow(
 
         # Log confusion matrix as artifact
         cm_path = output_dir / "confusion_matrix.json"
+        cm_labels = BINARY_ATTACK_TYPES if binary else ATTACK_TYPES
         with cm_path.open("w") as f:
             json.dump(
                 {
                     "matrix": metrics["classifier"]["confusion_matrix"],
-                    "labels": ATTACK_TYPES,
+                    "labels": cm_labels,
                 },
                 f,
                 indent=2,
@@ -462,6 +650,18 @@ def log_to_mlflow(
     type=click.Path(exists=False),
     default=None,
     help="Path to JSON file with training data. If not provided, generates synthetic data.",
+)
+@click.option(
+    "--csv-path",
+    type=click.Path(exists=False),
+    default=None,
+    help="Path to Kaggle CSV file with pre-computed features (bypasses FeatureExtractor).",
+)
+@click.option(
+    "--binary",
+    is_flag=True,
+    default=False,
+    help="Use binary classification (normal vs attack) instead of multi-class. Only with --csv-path.",
 )
 @click.option(
     "--output-dir",
@@ -495,9 +695,9 @@ def log_to_mlflow(
 )
 @click.option(
     "--contamination",
-    type=float,
-    default=0.1,
-    help="Expected proportion of outliers for anomaly detector.",
+    type=str,
+    default="auto",
+    help="Proportion of outliers. Use 'auto' to calculate from attack-ratio.",
 )
 @click.option(
     "--n-estimators",
@@ -518,6 +718,23 @@ def log_to_mlflow(
     help="Learning rate for XGBoost classifier.",
 )
 @click.option(
+    "--class-weight",
+    type=click.Choice(["balanced", "none"]),
+    default="balanced",
+    help="Class weighting strategy: 'balanced' (recommended) or 'none'.",
+)
+@click.option(
+    "--optimize-threshold/--no-optimize-threshold",
+    default=True,
+    help="Optimize anomaly threshold for target recall.",
+)
+@click.option(
+    "--target-recall",
+    type=float,
+    default=0.8,
+    help="Target recall for anomaly detection (0.8 = detect 80%% of attacks).",
+)
+@click.option(
     "--seed",
     type=int,
     default=42,
@@ -533,20 +750,31 @@ def log_to_mlflow(
     is_flag=True,
     help="Enable verbose output.",
 )
+@click.option(
+    "--use-window-features/--no-window-features",
+    default=True,
+    help="Use window features (25 total) for better brute_force vs credential_stuffing distinction.",
+)
 def main(  # noqa: PLR0915
     data_path: str | None,
+    csv_path: str | None,
+    binary: bool,
     output_dir: str,
     n_samples: int,
     attack_ratio: float,
     test_size: float,
     val_size: float,
-    contamination: float,
+    contamination: str,
     n_estimators: int,
     max_depth: int,
     learning_rate: float,
+    class_weight: str,
+    optimize_threshold: bool,
+    target_recall: float,
     seed: int,
-    mlflow_tracking: bool,
+    mlflow: bool,
     verbose: bool,
+    use_window_features: bool,
 ) -> None:
     """
     Train Sentinel ML models for intrusion detection.
@@ -560,8 +788,11 @@ def main(  # noqa: PLR0915
         # Train with synthetic data
         python -m ml.training.train --n-samples 10000 --output-dir models/
 
-        # Train with real data
+        # Train with real data (JSON)
         python -m ml.training.train --data-path data/events.json
+
+        # Train with Kaggle CSV (pre-computed features)
+        python -m ml.training.train --csv-path data/samples/cybersecurity_intrusion_data.csv
 
         # Train with custom parameters
         python -m ml.training.train --n-estimators 200 --max-depth 8
@@ -576,9 +807,11 @@ def main(  # noqa: PLR0915
     logger.info(
         "training_started",
         data_path=data_path,
+        csv_path=csv_path,
         output_dir=output_dir,
         n_samples=n_samples,
         attack_ratio=attack_ratio,
+        use_window_features=use_window_features,
     )
 
     # Create output directory
@@ -589,12 +822,27 @@ def main(  # noqa: PLR0915
     # Load/Generate Data
     # -------------------------------------------------------------------------
 
-    X, y, labels = load_or_generate_data(
-        data_path=data_path,
-        n_samples=n_samples,
-        attack_ratio=attack_ratio,
-        seed=seed,
-    )
+    if csv_path is not None:
+        # Load directly from Kaggle CSV (bypasses FeatureExtractor)
+        X, y, labels = load_kaggle_csv(csv_path, binary=binary)
+    elif use_window_features and data_path is None:
+        # Generate synthetic data with campaigns for window features (25 features)
+        print("\n" + "=" * 60)
+        print("Using Window Features (25 total: 17 event + 8 window)")
+        print("=" * 60)
+        X, y, labels = load_or_generate_data_with_campaigns(
+            n_samples=n_samples,
+            attack_ratio=attack_ratio,
+            seed=seed,
+        )
+    else:
+        # Load from JSON or generate synthetic data (17 features)
+        X, y, labels = load_or_generate_data(
+            data_path=data_path,
+            n_samples=n_samples,
+            attack_ratio=attack_ratio,
+            seed=seed,
+        )
 
     # Split data
     X_train_full, X_test, y_train_full, y_test, labels_train_full, labels_test = train_test_split(
@@ -628,6 +876,17 @@ def main(  # noqa: PLR0915
     train_dist = Counter([labels[i] for i in range(len(labels)) if i < len(X_train_full)])
     logger.info("class_distribution", distribution=dict(train_dist))
 
+    # Calculate actual contamination (proportion of attacks in data)
+    if contamination == "auto":
+        actual_contamination = attack_ratio
+        logger.info(
+            "auto_contamination_calculated",
+            attack_ratio=attack_ratio,
+            actual_contamination=actual_contamination,
+        )
+    else:
+        actual_contamination = float(contamination)
+
     # -------------------------------------------------------------------------
     # Train Models
     # -------------------------------------------------------------------------
@@ -638,10 +897,27 @@ def main(  # noqa: PLR0915
 
     detector = train_anomaly_detector(
         X_train=X_train,
-        contamination=contamination,
+        contamination=actual_contamination,
         n_estimators=n_estimators,
         random_state=seed,
     )
+
+    # Optimize threshold for target recall
+    if optimize_threshold:
+        print(f"Optimizing threshold for {target_recall:.0%} recall...")
+        # Create binary labels for anomaly detection (0=normal, 1=attack)
+        y_val_binary = np.array([0 if label == "normal" else 1 for label in labels_train_full])
+        # Use validation set indices
+        val_start = len(X_train)
+        val_end = val_start + len(X_val)
+        y_val_anomaly = y_val_binary[val_start:val_end]
+
+        detector.optimize_threshold_for_recall(
+            X_val=X_val,
+            y_val=y_val_anomaly,
+            target_recall=target_recall,
+        )
+        print(f"Threshold optimized: {detector._threshold:.4f}")
 
     # Save anomaly detector
     detector_path = output_path / "anomaly_detector.joblib"
@@ -661,6 +937,7 @@ def main(  # noqa: PLR0915
         max_depth=max_depth,
         learning_rate=learning_rate,
         random_state=seed,
+        class_weight=class_weight if class_weight != "none" else None,
     )
 
     # Save classifier
@@ -682,6 +959,7 @@ def main(  # noqa: PLR0915
         X_test=X_test,
         y_test=y_test,
         labels_test=labels_test,
+        binary=binary,
     )
 
     # Print summary
@@ -707,7 +985,15 @@ def main(  # noqa: PLR0915
     # MLflow Logging
     # -------------------------------------------------------------------------
 
-    if mlflow_tracking:
+    # Determine data source string
+    if csv_path:
+        data_source = f"csv:{csv_path}"
+    elif data_path:
+        data_source = f"json:{data_path}"
+    else:
+        data_source = "synthetic"
+
+    if mlflow:
         print("\n" + "=" * 60)
         print("Logging to MLflow")
         print("=" * 60)
@@ -717,12 +1003,12 @@ def main(  # noqa: PLR0915
             "attack_ratio": attack_ratio,
             "test_size": test_size,
             "val_size": val_size,
-            "contamination": contamination,
+            "contamination": actual_contamination,
             "n_estimators": n_estimators,
             "max_depth": max_depth,
             "learning_rate": learning_rate,
             "seed": seed,
-            "data_path": str(data_path) if data_path else "synthetic",
+            "data_source": data_source,
         }
 
         run_id = log_to_mlflow(
@@ -731,6 +1017,7 @@ def main(  # noqa: PLR0915
             classifier=classifier,
             params=params,
             output_dir=output_path,
+            binary=binary,
         )
 
         print(f"MLflow run ID: {run_id}")
@@ -743,14 +1030,14 @@ def main(  # noqa: PLR0915
     summary = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "data": {
-            "source": str(data_path) if data_path else "synthetic",
-            "n_samples": n_samples if not data_path else len(X),
+            "source": data_source,
+            "n_samples": len(X),
             "train_size": len(X_train),
             "val_size": len(X_val),
             "test_size": len(X_test),
         },
         "parameters": {
-            "contamination": contamination,
+            "contamination": actual_contamination,
             "n_estimators": n_estimators,
             "max_depth": max_depth,
             "learning_rate": learning_rate,

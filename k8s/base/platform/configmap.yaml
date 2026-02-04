@@ -9,11 +9,11 @@ metadata:
     app.kubernetes.io/part-of: sentinel
     app.kubernetes.io/managed-by: kustomize
 data:
+  # Base configuration - override in overlays for environment-specific values
   ENVIRONMENT: "dev"
   LOG_LEVEL: "INFO"
   LOG_FORMAT: "json"
-  MODELS_BUCKET: "sentinel-models-dev-PROJECT_ID"
-  MODELS_PATH: "gs://sentinel-models-dev-PROJECT_ID/"
+  # MODELS_BUCKET and MODELS_PATH are set in overlays with actual project ID
   ENABLE_METRICS: "true"
   WORKERS: "2"
   HOST: "0.0.0.0"
