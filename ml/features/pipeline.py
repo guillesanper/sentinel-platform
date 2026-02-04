@@ -334,3 +334,115 @@ class FeatureExtractor:
             descriptions.append("Connection from external IP address")
 
         return descriptions[:top_k]
+
+
+# ============================================================================
+# Combined Feature Extractor (Event + Window Features)
+# ============================================================================
+
+
+class CombinedFeatureExtractor:
+    """
+    Combined extractor that concatenates event features with window features.
+
+    Produces 25 total features:
+    - 17 from FeatureExtractor (per-event features)
+    - 8 from WindowFeatureExtractor (aggregate features over event groups)
+
+    This is essential for distinguishing attacks that differ in group behavior:
+    - brute_force: unique_users_from_ip ~ 0.02 (1 user)
+    - credential_stuffing: unique_users_from_ip > 0.5 (many users)
+
+    Example:
+        >>> extractor = CombinedFeatureExtractor()
+        >>> # For training with campaigns (groups of events):
+        >>> events_group = [event1, event2, event3]  # same source_ip
+        >>> features = extractor.transform_group(events_group)
+        >>> features.shape
+        (25,)
+
+        >>> # For single event inference:
+        >>> features = extractor.transform(single_event)
+        >>> features.shape
+        (25,)
+    """
+
+    def __init__(self) -> None:
+        """Initialize the combined feature extractor."""
+        from ml.features.window_features import WindowFeatureExtractor
+
+        self.event_extractor = FeatureExtractor()
+        self.window_extractor = WindowFeatureExtractor()
+        self.n_features = self.event_extractor.n_features + self.window_extractor.n_features
+
+        logger.info(
+            "combined_feature_extractor_initialized",
+            event_features=self.event_extractor.n_features,
+            window_features=self.window_extractor.n_features,
+            total_features=self.n_features,
+        )
+
+    def transform(self, event: dict[str, Any]) -> np.ndarray:
+        """
+        Transform a single event into combined features.
+
+        Uses default window features suitable for real-time inference.
+
+        Args:
+            event: Security event dictionary.
+
+        Returns:
+            numpy array of shape (25,) with event + window features.
+        """
+        event_features = self.event_extractor.transform(event)
+        window_features = self.window_extractor.transform_single_event(event)
+
+        return np.concatenate([event_features, window_features])
+
+    def transform_group(self, events: list[dict[str, Any]]) -> np.ndarray:
+        """
+        Transform a group of events into combined features.
+
+        Uses the first event as representative for event features,
+        and all events for window features.
+
+        Args:
+            events: List of security event dictionaries (same source_ip).
+
+        Returns:
+            numpy array of shape (25,) with event + window features.
+        """
+        if not events:
+            return np.zeros(self.n_features, dtype=np.float32)
+
+        # Use first event as representative for event-level features
+        representative_event = events[0]
+        event_features = self.event_extractor.transform(representative_event)
+
+        # Use all events for window features
+        window_features = self.window_extractor.transform(events)
+
+        return np.concatenate([event_features, window_features])
+
+    def transform_batch_groups(
+        self,
+        event_groups: list[list[dict[str, Any]]],
+    ) -> np.ndarray:
+        """
+        Transform multiple groups of events into a feature matrix.
+
+        Args:
+            event_groups: List of event groups, where each group contains
+                          events from the same campaign/source_ip.
+
+        Returns:
+            numpy array of shape (n_groups, 25).
+        """
+        return np.array(
+            [self.transform_group(group) for group in event_groups],
+            dtype=np.float32,
+        )
+
+    def get_feature_names(self) -> list[str]:
+        """Return list of all feature names."""
+        return self.event_extractor.get_feature_names() + self.window_extractor.get_feature_names()

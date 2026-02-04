@@ -871,7 +871,9 @@ class SyntheticEventGenerator:
             # Override with campaign-specific values
             event["actor"]["source_ip"] = source_ip
 
-            if attack_type in ("brute_force", "credential_stuffing"):
+            # brute_force: SAME user (overwrite with target_user)
+            # credential_stuffing: MULTIPLE users (keep the random user from generator)
+            if attack_type == "brute_force":
                 event["actor"]["user"] = target_user
 
             # Spread events across the duration
@@ -890,6 +892,122 @@ class SyntheticEventGenerator:
         )
 
         return events
+
+    def generate_dataset_with_campaigns(
+        self,
+        n_samples: int = 10000,
+        attack_ratio: float = 0.3,
+        events_per_campaign: tuple[int, int] = (10, 50),
+        attack_distribution: dict[str, float] | None = None,
+    ) -> tuple[list[list[dict[str, Any]]], list[str], list[str]]:
+        """
+        Generate a dataset organized into campaigns for window feature extraction.
+
+        Each campaign is a group of events from the same source IP, simulating
+        realistic attack patterns where attackers maintain consistent IPs during
+        attack sessions.
+
+        Args:
+            n_samples: Approximate total number of events to generate.
+            attack_ratio: Ratio of attack campaigns (0.0 to 1.0).
+            events_per_campaign: (min, max) events per campaign.
+            attack_distribution: Optional custom distribution of attack types.
+
+        Returns:
+            Tuple of (event_groups, labels, campaign_ids) where:
+            - event_groups: List of event lists, one per campaign
+            - labels: Attack type for each campaign
+            - campaign_ids: Unique ID for each campaign
+        """
+        event_groups: list[list[dict[str, Any]]] = []
+        labels: list[str] = []
+        campaign_ids: list[str] = []
+
+        # Estimate number of campaigns
+        avg_events = (events_per_campaign[0] + events_per_campaign[1]) // 2
+        n_campaigns = max(n_samples // avg_events, 10)
+        n_attack_campaigns = int(n_campaigns * attack_ratio)
+        n_normal_campaigns = n_campaigns - n_attack_campaigns
+
+        # Default attack distribution (uniform)
+        if attack_distribution is None:
+            attack_types = list(self.ATTACK_GENERATORS.keys())
+            attack_types.remove("normal")
+            attack_distribution = {at: 1.0 / len(attack_types) for at in attack_types}
+
+        # Generate normal campaigns
+        logger.info("generating_normal_campaigns", count=n_normal_campaigns)
+        for i in range(n_normal_campaigns):
+            n_events = random.randint(*events_per_campaign)
+            source_ip = _random_ip(internal=True)
+
+            events = []
+            for _ in range(n_events):
+                event = generate_normal_event()
+                event["actor"]["source_ip"] = source_ip
+                events.append(event)
+
+            event_groups.append(events)
+            labels.append("normal")
+            campaign_ids.append(f"normal_{i}")
+
+        # Generate attack campaigns
+        logger.info(
+            "generating_attack_campaigns",
+            count=n_attack_campaigns,
+            distribution=attack_distribution,
+        )
+
+        # Calculate counts per attack type
+        attack_counts: dict[str, int] = {}
+        remaining = n_attack_campaigns
+        attack_items = list(attack_distribution.items())
+
+        for i, (attack_type, ratio) in enumerate(attack_items):
+            if i == len(attack_items) - 1:
+                attack_counts[attack_type] = remaining
+            else:
+                count = int(n_attack_campaigns * ratio)
+                attack_counts[attack_type] = count
+                remaining -= count
+
+        campaign_idx = 0
+        for attack_type, count in attack_counts.items():
+            for _ in range(count):
+                n_events = random.randint(*events_per_campaign)
+
+                # Generate campaign with consistent source_ip
+                events = self.generate_campaign(
+                    attack_type=attack_type,
+                    n_events=n_events,
+                    duration_minutes=random.randint(5, 60),
+                )
+
+                event_groups.append(events)
+                labels.append(attack_type)
+                campaign_ids.append(f"{attack_type}_{campaign_idx}")
+                campaign_idx += 1
+
+        # Shuffle campaigns
+        combined = list(zip(event_groups, labels, campaign_ids, strict=True))
+        random.shuffle(combined)
+
+        if combined:
+            event_groups, labels, campaign_ids = zip(*combined, strict=True)
+            event_groups = list(event_groups)
+            labels = list(labels)
+            campaign_ids = list(campaign_ids)
+
+        total_events = sum(len(g) for g in event_groups)
+        logger.info(
+            "campaign_dataset_generated",
+            n_campaigns=len(event_groups),
+            total_events=total_events,
+            normal_campaigns=n_normal_campaigns,
+            attack_campaigns=n_attack_campaigns,
+        )
+
+        return event_groups, labels, campaign_ids
 
 
 def generate_dataset(

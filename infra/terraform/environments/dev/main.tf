@@ -21,6 +21,18 @@ terraform {
       source  = "hashicorp/google-beta"
       version = "~> 5.0"
     }
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.25"
+    }
+    helm = {
+      source  = "hashicorp/helm"
+      version = "~> 2.12"
+    }
+    kubectl = {
+      source  = "alekc/kubectl"
+      version = "~> 2.0"
+    }
   }
 
   # Backend configuration - uncomment and configure for remote state
@@ -38,6 +50,31 @@ provider "google" {
 provider "google-beta" {
   project = var.project_id
   region  = var.region
+}
+
+# Get GKE cluster credentials
+data "google_client_config" "default" {}
+
+# Kubernetes provider - configured after GKE cluster is created
+provider "kubernetes" {
+  host                   = "https://${module.gke.cluster_endpoint}"
+  token                  = data.google_client_config.default.access_token
+  cluster_ca_certificate = base64decode(module.gke.cluster_ca_certificate)
+}
+
+provider "helm" {
+  kubernetes {
+    host                   = "https://${module.gke.cluster_endpoint}"
+    token                  = data.google_client_config.default.access_token
+    cluster_ca_certificate = base64decode(module.gke.cluster_ca_certificate)
+  }
+}
+
+provider "kubectl" {
+  host                   = "https://${module.gke.cluster_endpoint}"
+  token                  = data.google_client_config.default.access_token
+  cluster_ca_certificate = base64decode(module.gke.cluster_ca_certificate)
+  load_config_file       = false
 }
 
 locals {
@@ -117,16 +154,11 @@ module "gke" {
   default_node_pool_max_count     = 3
   default_node_pool_initial_count = 1
   default_node_pool_disk_size_gb  = 50
+  default_node_pool_disk_type     = "pd-balanced"  # Avoid SSD quota limits
   default_node_pool_spot          = true  # Use spot for cost savings
 
-  # ML node pool - minimal for dev
-  enable_ml_node_pool         = true
-  ml_node_pool_machine_type   = "n2-highmem-2"
-  ml_node_pool_min_count      = 0
-  ml_node_pool_max_count      = 2
-  ml_node_pool_initial_count  = 0  # Scale to 0 when not in use
-  ml_node_pool_disk_size_gb   = 100
-  ml_node_pool_spot           = true
+  # ML node pool - disabled for dev (saves SSD quota)
+  enable_ml_node_pool = false
 
   # Security features
   enable_workload_identity   = true
@@ -247,4 +279,33 @@ module "security" {
   enable_kms = false
 
   labels = local.labels
+}
+
+################################################################################
+# Kubernetes Module - External Secrets Operator
+################################################################################
+
+module "kubernetes" {
+  source = "../../modules/kubernetes"
+
+  project_id  = var.project_id
+  region      = var.region
+  environment = local.environment
+
+  # GKE cluster configuration
+  cluster_name           = module.gke.cluster_name
+  cluster_endpoint       = module.gke.cluster_endpoint
+  cluster_ca_certificate = module.gke.cluster_ca_certificate
+
+  # External Secrets Operator
+  install_eso   = true
+  eso_namespace = "external-secrets"
+
+  # Secrets to sync from GCP Secret Manager
+  secrets_to_sync   = ["jwt-secret", "api-key"]
+  target_namespaces = ["platform", "ml"]
+
+  labels = local.labels
+
+  depends_on = [module.gke, module.security, module.iam]
 }

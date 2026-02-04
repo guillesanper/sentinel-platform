@@ -1,11 +1,11 @@
 {
-  "timestamp": "2026-01-27T17:31:15.290234Z",
+  "timestamp": "2026-01-28T02:54:07.134137Z",
   "data": {
     "source": "synthetic",
-    "n_samples": 20000,
-    "train_size": 14400,
-    "val_size": 1600,
-    "test_size": 4000
+    "n_samples": 666,
+    "train_size": 478,
+    "val_size": 54,
+    "test_size": 134
   },
   "parameters": {
     "contamination": 0.3,
@@ -16,87 +16,78 @@
   },
   "metrics": {
     "anomaly": {
-      "accuracy": 0.31375,
-      "precision": 0.3041825095057034,
-      "recall": 1.0,
-      "f1": 0.46647230320699706
+      "accuracy": 0.5522388059701493,
+      "precision": 0.3979591836734694,
+      "recall": 0.975,
+      "f1": 0.5652173913043478
     },
     "classifier": {
-      "accuracy": 0.92475,
-      "precision": 0.9409015267918648,
-      "recall": 0.92475,
-      "f1": 0.9286227320121021,
+      "accuracy": 0.9925373134328358,
+      "precision": 0.9936034115138592,
+      "recall": 0.9925373134328358,
+      "f1": 0.9925373134328358,
       "classification_report": {
         "normal": {
-          "precision": 0.9976699029126214,
-          "recall": 0.9175,
-          "f1-score": 0.955906976744186,
-          "support": 2800.0
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1-score": 1.0,
+          "support": 94.0
         },
         "brute_force": {
-          "precision": 0.6857142857142857,
-          "recall": 0.72,
-          "f1-score": 0.7024390243902439,
-          "support": 200.0
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1-score": 1.0,
+          "support": 7.0
         },
         "credential_stuffing": {
-          "precision": 0.7741935483870968,
-          "recall": 0.96,
-          "f1-score": 0.8571428571428571,
-          "support": 200.0
+          "precision": 0.8571428571428571,
+          "recall": 1.0,
+          "f1-score": 0.9230769230769231,
+          "support": 6.0
         },
         "privilege_escalation": {
-          "precision": 0.6769759450171822,
-          "recall": 0.985,
-          "f1-score": 0.8024439918533605,
-          "support": 200.0
+          "precision": 1.0,
+          "recall": 0.8571428571428571,
+          "f1-score": 0.9230769230769231,
+          "support": 7.0
         },
         "lateral_movement": {
           "precision": 1.0,
           "recall": 1.0,
           "f1-score": 1.0,
-          "support": 200.0
+          "support": 7.0
         },
         "data_exfiltration": {
           "precision": 1.0,
           "recall": 1.0,
           "f1-score": 1.0,
-          "support": 200.0
+          "support": 6.0
         },
         "reconnaissance": {
-          "precision": 0.7137681159420289,
-          "recall": 0.985,
-          "f1-score": 0.8277310924369747,
-          "support": 200.0
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1-score": 1.0,
+          "support": 7.0
         },
-        "accuracy": 0.92475,
+        "accuracy": 0.9925373134328358,
         "macro avg": {
-          "precision": 0.8354745425676022,
-          "recall": 0.9382142857142857,
-          "f1-score": 0.8779519917953745,
-          "support": 4000.0
+          "precision": 0.979591836734694,
+          "recall": 0.979591836734694,
+          "f1-score": 0.9780219780219781,
+          "support": 134.0
         },
         "weighted avg": {
-          "precision": 0.9409015267918648,
-          "recall": 0.92475,
-          "f1-score": 0.9286227320121021,
-          "support": 4000.0
+          "precision": 0.9936034115138592,
+          "recall": 0.9925373134328358,
+          "f1-score": 0.9925373134328358,
+          "support": 134.0
         }
       },
       "confusion_matrix": [
         [
-          2569,
-          58,
-          0,
           94,
           0,
           0,
-          79
-        ],
-        [
-          0,
-          144,
-          56,
           0,
           0,
           0,
@@ -104,18 +95,9 @@
         ],
         [
           0,
-          8,
-          192,
+          7,
           0,
           0,
-          0,
-          0
-        ],
-        [
-          3,
-          0,
-          0,
-          197,
           0,
           0,
           0
@@ -123,9 +105,18 @@
         [
           0,
           0,
+          6,
           0,
           0,
-          200,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          1,
+          6,
+          0,
           0,
           0
         ],
@@ -134,63 +125,72 @@
           0,
           0,
           0,
+          7,
           0,
-          200,
           0
         ],
         [
-          3,
           0,
           0,
           0,
           0,
           0,
-          197
+          6,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          7
         ]
       ]
     },
     "per_attack_type": {
       "normal": {
-        "precision": 0.9976699029126214,
-        "recall": 0.9175,
-        "f1": 0.955906976744186,
-        "support": 2800.0
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "support": 94.0
       },
       "brute_force": {
-        "precision": 0.6857142857142857,
-        "recall": 0.72,
-        "f1": 0.7024390243902439,
-        "support": 200.0
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "support": 7.0
       },
       "credential_stuffing": {
-        "precision": 0.7741935483870968,
-        "recall": 0.96,
-        "f1": 0.8571428571428571,
-        "support": 200.0
+        "precision": 0.8571428571428571,
+        "recall": 1.0,
+        "f1": 0.9230769230769231,
+        "support": 6.0
       },
       "privilege_escalation": {
-        "precision": 0.6769759450171822,
-        "recall": 0.985,
-        "f1": 0.8024439918533605,
-        "support": 200.0
+        "precision": 1.0,
+        "recall": 0.8571428571428571,
+        "f1": 0.9230769230769231,
+        "support": 7.0
       },
       "lateral_movement": {
         "precision": 1.0,
         "recall": 1.0,
         "f1": 1.0,
-        "support": 200.0
+        "support": 7.0
       },
       "data_exfiltration": {
         "precision": 1.0,
         "recall": 1.0,
         "f1": 1.0,
-        "support": 200.0
+        "support": 6.0
       },
       "reconnaissance": {
-        "precision": 0.7137681159420289,
-        "recall": 0.985,
-        "f1": 0.8277310924369747,
-        "support": 200.0
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "support": 7.0
       }
     }
   },

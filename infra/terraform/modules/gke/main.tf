@@ -104,13 +104,9 @@ resource "google_container_cluster" "cluster" {
     }
   }
 
-  # Network policy (Calico)
-  network_policy {
-    enabled  = var.enable_network_policy
-    provider = var.enable_network_policy ? "CALICO" : "PROVIDER_UNSPECIFIED"
-  }
-
   # Datapath provider for better network performance
+  # ADVANCED_DATAPATH (Dataplane V2) uses Cilium which provides built-in
+  # network policy enforcement - no need for the legacy Calico network_policy addon
   datapath_provider = "ADVANCED_DATAPATH"
 
   # Addons configuration
@@ -123,8 +119,10 @@ resource "google_container_cluster" "cluster" {
       disabled = !var.enable_horizontal_pod_autoscaling
     }
 
+    # Network policy addon disabled - Dataplane V2 (ADVANCED_DATAPATH)
+    # provides network policy enforcement via Cilium
     network_policy_config {
-      disabled = !var.enable_network_policy
+      disabled = true
     }
 
     gce_persistent_disk_csi_driver_config {
@@ -291,7 +289,7 @@ resource "google_container_node_pool" "default" {
 
     # Linux node config
     linux_node_config {
-      sysctl = {
+      sysctls = {
         "net.core.somaxconn"           = "32768"
         "net.ipv4.tcp_max_syn_backlog" = "32768"
       }

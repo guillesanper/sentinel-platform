@@ -10,9 +10,10 @@ commonLabels:
   environment: dev
 
 # Image configuration for dev
+# Note: Update PROJECT_ID with your actual GCP project ID
 images:
   - name: sentinel-api
-    newName: gcr.io/${PROJECT_ID}/sentinel-api
+    newName: gcr.io/PROJECT_ID/sentinel-api  # TODO: Replace PROJECT_ID
     newTag: dev-latest
 
 # Patches for dev environment
@@ -55,8 +56,21 @@ patches:
                   limits:
                     cpu: 250m
                     memory: 256Mi
+                # Reference secrets from ESO (sentinel-secrets)
+                env:
+                  - name: JWT_SECRET
+                    valueFrom:
+                      secretKeyRef:
+                        name: sentinel-secrets
+                        key: jwt-secret
+                  - name: API_KEY
+                    valueFrom:
+                      secretKeyRef:
+                        name: sentinel-secrets
+                        key: api-key
 
 # ConfigMap patches for dev
+# Note: Update PROJECT_ID with your actual GCP project ID
 configMapGenerator:
   - name: sentinel-api-config
     namespace: platform
@@ -64,15 +78,11 @@ configMapGenerator:
     literals:
       - ENVIRONMENT=dev
       - LOG_LEVEL=DEBUG
-      - MODELS_BUCKET=sentinel-models-dev-${PROJECT_ID}
-      - MODELS_PATH=gs://sentinel-models-dev-${PROJECT_ID}/
+      - MODELS_BUCKET=sentinel-models-dev-PROJECT_ID  # TODO: Replace PROJECT_ID
+      - MODELS_PATH=gs://sentinel-models-dev-PROJECT_ID/  # TODO: Replace PROJECT_ID
       - ENABLE_METRICS=true
       - WORKERS=1
 
-# Secret placeholder (use External Secrets or CSI driver in production)
-secretGenerator:
-  - name: sentinel-api-secrets
-    namespace: platform
-    literals:
-      - jwt-secret=dev-jwt-secret-change-me
-      - api-key=dev-api-key-change-me
+# Secrets are managed by External Secrets Operator (ESO)
+# ESO creates 'sentinel-secrets' in this namespace from GCP Secret Manager
+# See k8s/base/external-secrets/README.md for details

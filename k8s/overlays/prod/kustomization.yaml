@@ -10,9 +10,10 @@ commonLabels:
   environment: prod
 
 # Image configuration for prod
+# Note: Update PROJECT_ID with your actual GCP project ID
 images:
   - name: sentinel-api
-    newName: gcr.io/${PROJECT_ID}/sentinel-api
+    newName: gcr.io/PROJECT_ID/sentinel-api  # TODO: Replace PROJECT_ID
     # Use specific version tags in production, not 'latest'
     newTag: v1.0.0
 
@@ -56,6 +57,18 @@ patches:
                   limits:
                     cpu: "1"
                     memory: 1Gi
+                # Reference secrets from ESO (sentinel-secrets)
+                env:
+                  - name: JWT_SECRET
+                    valueFrom:
+                      secretKeyRef:
+                        name: sentinel-secrets
+                        key: jwt-secret
+                  - name: API_KEY
+                    valueFrom:
+                      secretKeyRef:
+                        name: sentinel-secrets
+                        key: api-key
   # Higher PDB for prod
   - patch: |-
       apiVersion: policy/v1
@@ -66,6 +79,7 @@ patches:
       spec:
         minAvailable: 2
   # Update ServiceAccount annotation for prod
+  # Note: Update PROJECT_ID with your actual GCP project ID
   - patch: |-
       apiVersion: v1
       kind: ServiceAccount
@@ -73,9 +87,10 @@ patches:
         name: sentinel-api
         namespace: platform
         annotations:
-          iam.gke.io/gcp-service-account: sentinel-api-prod@${PROJECT_ID}.iam.gserviceaccount.com
+          iam.gke.io/gcp-service-account: sentinel-api-prod@PROJECT_ID.iam.gserviceaccount.com
 
 # ConfigMap patches for prod
+# Note: Update PROJECT_ID with your actual GCP project ID
 configMapGenerator:
   - name: sentinel-api-config
     namespace: platform
@@ -84,18 +99,11 @@ configMapGenerator:
       - ENVIRONMENT=prod
       - LOG_LEVEL=INFO
       - LOG_FORMAT=json
-      - MODELS_BUCKET=sentinel-models-prod-${PROJECT_ID}
-      - MODELS_PATH=gs://sentinel-models-prod-${PROJECT_ID}/
+      - MODELS_BUCKET=sentinel-models-prod-PROJECT_ID  # TODO: Replace PROJECT_ID
+      - MODELS_PATH=gs://sentinel-models-prod-PROJECT_ID/  # TODO: Replace PROJECT_ID
       - ENABLE_METRICS=true
       - WORKERS=4
 
-# In production, use External Secrets Operator or GCP Secret Manager CSI driver
-# This is a placeholder - DO NOT use in actual production
-secretGenerator:
-  - name: sentinel-api-secrets
-    namespace: platform
-    options:
-      disableNameSuffixHash: true
-    literals:
-      - jwt-secret=PLACEHOLDER_USE_EXTERNAL_SECRETS
-      - api-key=PLACEHOLDER_USE_EXTERNAL_SECRETS
+# Secrets are managed by External Secrets Operator (ESO)
+# ESO creates 'sentinel-secrets' in this namespace from GCP Secret Manager
+# See k8s/base/external-secrets/README.md for details

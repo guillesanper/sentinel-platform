@@ -36,7 +36,7 @@ from sklearn.model_selection import train_test_split
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from ml.features.pipeline import FeatureExtractor  # noqa: E402
+from ml.features.pipeline import CombinedFeatureExtractor, FeatureExtractor  # noqa: E402
 from ml.models.anomaly_detector import AnomalyDetector  # noqa: E402
 from ml.models.classifier import ATTACK_TYPES, LABEL_TO_IDX, AttackClassifier  # noqa: E402
 
@@ -235,8 +235,7 @@ def load_kaggle_csv(
     if binary:
         # Binary classification: normal (0) vs brute_force (1) as generic "attack"
         labels = [
-            "normal" if row["attack_detected"] == 0 else "brute_force"
-            for _, row in df.iterrows()
+            "normal" if row["attack_detected"] == 0 else "brute_force" for _, row in df.iterrows()
         ]
     else:
         # Multi-class: infer attack types from features (heuristics)
@@ -250,6 +249,68 @@ def load_kaggle_csv(
         X_shape=X.shape,
         y_shape=y.shape,
         label_distribution={k: labels.count(k) for k in set(labels)},
+    )
+
+    return X, y, labels
+
+
+def load_or_generate_data_with_campaigns(
+    n_samples: int = 10000,
+    attack_ratio: float = 0.3,
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """
+    Generate synthetic data with campaigns and extract combined features.
+
+    Uses CombinedFeatureExtractor (17 event + 8 window = 25 features) to
+    properly capture attack patterns that differ by user cardinality:
+    - brute_force: same user, same IP
+    - credential_stuffing: multiple users, same IP
+
+    Args:
+        n_samples: Approximate number of events to generate.
+        attack_ratio: Ratio of attack campaigns.
+        seed: Random seed for reproducibility.
+
+    Returns:
+        Tuple of (X, y, labels) where:
+        - X: Feature matrix of shape (n_campaigns, 25)
+        - y: Encoded labels of shape (n_campaigns,)
+        - labels: String labels list (one per campaign)
+    """
+    from data.generators.synthetic import SyntheticEventGenerator
+
+    logger.info(
+        "generating_campaign_data",
+        n_samples=n_samples,
+        attack_ratio=attack_ratio,
+        seed=seed,
+    )
+
+    generator = SyntheticEventGenerator(seed=seed)
+    event_groups, labels, campaign_ids = generator.generate_dataset_with_campaigns(
+        n_samples=n_samples,
+        attack_ratio=attack_ratio,
+    )
+
+    logger.info(
+        "campaigns_generated",
+        n_campaigns=len(event_groups),
+        total_events=sum(len(g) for g in event_groups),
+    )
+
+    # Extract combined features (17 event + 8 window = 25 total)
+    extractor = CombinedFeatureExtractor()
+    X = extractor.transform_batch_groups(event_groups)
+
+    # Encode labels
+    y = np.array([LABEL_TO_IDX.get(label, 0) for label in labels], dtype=np.int32)
+
+    logger.info(
+        "campaign_features_extracted",
+        X_shape=X.shape,
+        y_shape=y.shape,
+        n_features=X.shape[1],
     )
 
     return X, y, labels
@@ -689,6 +750,11 @@ def log_to_mlflow(
     is_flag=True,
     help="Enable verbose output.",
 )
+@click.option(
+    "--use-window-features/--no-window-features",
+    default=True,
+    help="Use window features (25 total) for better brute_force vs credential_stuffing distinction.",
+)
 def main(  # noqa: PLR0915
     data_path: str | None,
     csv_path: str | None,
@@ -708,6 +774,7 @@ def main(  # noqa: PLR0915
     seed: int,
     mlflow: bool,
     verbose: bool,
+    use_window_features: bool,
 ) -> None:
     """
     Train Sentinel ML models for intrusion detection.
@@ -744,6 +811,7 @@ def main(  # noqa: PLR0915
         output_dir=output_dir,
         n_samples=n_samples,
         attack_ratio=attack_ratio,
+        use_window_features=use_window_features,
     )
 
     # Create output directory
@@ -757,8 +825,18 @@ def main(  # noqa: PLR0915
     if csv_path is not None:
         # Load directly from Kaggle CSV (bypasses FeatureExtractor)
         X, y, labels = load_kaggle_csv(csv_path, binary=binary)
+    elif use_window_features and data_path is None:
+        # Generate synthetic data with campaigns for window features (25 features)
+        print("\n" + "=" * 60)
+        print("Using Window Features (25 total: 17 event + 8 window)")
+        print("=" * 60)
+        X, y, labels = load_or_generate_data_with_campaigns(
+            n_samples=n_samples,
+            attack_ratio=attack_ratio,
+            seed=seed,
+        )
     else:
-        # Load from JSON or generate synthetic data
+        # Load from JSON or generate synthetic data (17 features)
         X, y, labels = load_or_generate_data(
             data_path=data_path,
             n_samples=n_samples,
@@ -907,16 +985,18 @@ def main(  # noqa: PLR0915
     # MLflow Logging
     # -------------------------------------------------------------------------
 
+    # Determine data source string
+    if csv_path:
+        data_source = f"csv:{csv_path}"
+    elif data_path:
+        data_source = f"json:{data_path}"
+    else:
+        data_source = "synthetic"
+
     if mlflow:
         print("\n" + "=" * 60)
         print("Logging to MLflow")
         print("=" * 60)
-
-        data_source = "synthetic"
-        if csv_path:
-            data_source = f"csv:{csv_path}"
-        elif data_path:
-            data_source = f"json:{data_path}"
 
         params = {
             "n_samples": n_samples,
@@ -947,18 +1027,10 @@ def main(  # noqa: PLR0915
     # Save Metrics Summary
     # -------------------------------------------------------------------------
 
-    # Determine data source for summary
-    if csv_path:
-        source_str = f"csv:{csv_path}"
-    elif data_path:
-        source_str = f"json:{data_path}"
-    else:
-        source_str = "synthetic"
-
     summary = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "data": {
-            "source": source_str,
+            "source": data_source,
             "n_samples": len(X),
             "train_size": len(X_train),
             "val_size": len(X_val),

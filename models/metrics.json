@@ -1,86 +1,86 @@
 {
   "anomaly": {
-    "accuracy": 0.73975,
-    "precision": 0.7012658227848101,
-    "recall": 0.23083333333333333,
-    "f1": 0.34733542319749217
+    "accuracy": 0.5522388059701493,
+    "precision": 0.3979591836734694,
+    "recall": 0.975,
+    "f1": 0.5652173913043478
   },
   "classifier": {
-    "accuracy": 0.94725,
-    "precision": 0.9487119442452796,
-    "recall": 0.94725,
-    "f1": 0.9471665183412765,
+    "accuracy": 0.9925373134328358,
+    "precision": 0.9936034115138592,
+    "recall": 0.9925373134328358,
+    "f1": 0.9925373134328358,
     "classification_report": {
       "normal": {
-        "precision": 0.9728571428571429,
-        "recall": 0.9728571428571429,
-        "f1-score": 0.9728571428571429,
-        "support": 2800.0
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1-score": 1.0,
+        "support": 94.0
       },
       "brute_force": {
-        "precision": 0.7202072538860104,
-        "recall": 0.695,
-        "f1-score": 0.7073791348600509,
-        "support": 200.0
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1-score": 1.0,
+        "support": 7.0
       },
       "credential_stuffing": {
-        "precision": 0.7831325301204819,
-        "recall": 0.975,
-        "f1-score": 0.8685968819599109,
-        "support": 200.0
+        "precision": 0.8571428571428571,
+        "recall": 1.0,
+        "f1-score": 0.9230769230769231,
+        "support": 6.0
       },
       "privilege_escalation": {
-        "precision": 0.9772727272727273,
-        "recall": 0.86,
-        "f1-score": 0.9148936170212766,
-        "support": 200.0
+        "precision": 1.0,
+        "recall": 0.8571428571428571,
+        "f1-score": 0.9230769230769231,
+        "support": 7.0
       },
       "lateral_movement": {
         "precision": 1.0,
         "recall": 1.0,
         "f1-score": 1.0,
-        "support": 200.0
+        "support": 7.0
       },
       "data_exfiltration": {
         "precision": 1.0,
         "recall": 1.0,
         "f1-score": 1.0,
-        "support": 200.0
+        "support": 6.0
       },
       "reconnaissance": {
-        "precision": 0.8736263736263736,
-        "recall": 0.795,
-        "f1-score": 0.8324607329842932,
-        "support": 200.0
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1-score": 1.0,
+        "support": 7.0
       },
-      "accuracy": 0.94725,
+      "accuracy": 0.9925373134328358,
       "macro avg": {
-        "precision": 0.9038708611089622,
-        "recall": 0.8996938775510204,
-        "f1-score": 0.8994553585260964,
-        "support": 4000.0
+        "precision": 0.979591836734694,
+        "recall": 0.979591836734694,
+        "f1-score": 0.9780219780219781,
+        "support": 134.0
       },
       "weighted avg": {
-        "precision": 0.9487119442452796,
-        "recall": 0.94725,
-        "f1-score": 0.9471665183412765,
-        "support": 4000.0
+        "precision": 0.9936034115138592,
+        "recall": 0.9925373134328358,
+        "f1-score": 0.9925373134328358,
+        "support": 134.0
       }
     },
     "confusion_matrix": [
       [
-        2724,
-        49,
-        0,
-        4,
+        94,
         0,
         0,
-        23
+        0,
+        0,
+        0,
+        0
       ],
       [
+        0,
         7,
-        139,
-        54,
+        0,
         0,
         0,
         0,
@@ -88,28 +88,19 @@
       ],
       [
         0,
-        5,
-        195,
+        0,
+        6,
         0,
         0,
         0,
         0
       ],
       [
-        28,
         0,
         0,
-        172,
+        1,
+        6,
         0,
-        0,
-        0
-      ],
-      [
-        0,
-        0,
-        0,
-        0,
-        200,
         0,
         0
       ],
@@ -118,63 +109,72 @@
         0,
         0,
         0,
+        7,
         0,
-        200,
         0
       ],
       [
-        41,
         0,
         0,
         0,
         0,
         0,
-        159
+        6,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        7
       ]
     ]
   },
   "per_attack_type": {
     "normal": {
-      "precision": 0.9728571428571429,
-      "recall": 0.9728571428571429,
-      "f1": 0.9728571428571429,
-      "support": 2800.0
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 94.0
     },
     "brute_force": {
-      "precision": 0.7202072538860104,
-      "recall": 0.695,
-      "f1": 0.7073791348600509,
-      "support": 200.0
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 7.0
     },
     "credential_stuffing": {
-      "precision": 0.7831325301204819,
-      "recall": 0.975,
-      "f1": 0.8685968819599109,
-      "support": 200.0
+      "precision": 0.8571428571428571,
+      "recall": 1.0,
+      "f1": 0.9230769230769231,
+      "support": 6.0
     },
     "privilege_escalation": {
-      "precision": 0.9772727272727273,
-      "recall": 0.86,
-      "f1": 0.9148936170212766,
-      "support": 200.0
+      "precision": 1.0,
+      "recall": 0.8571428571428571,
+      "f1": 0.9230769230769231,
+      "support": 7.0
     },
     "lateral_movement": {
       "precision": 1.0,
       "recall": 1.0,
       "f1": 1.0,
-      "support": 200.0
+      "support": 7.0
     },
     "data_exfiltration": {
       "precision": 1.0,
       "recall": 1.0,
       "f1": 1.0,
-      "support": 200.0
+      "support": 6.0
     },
     "reconnaissance": {
-      "precision": 0.8736263736263736,
-      "recall": 0.795,
-      "f1": 0.8324607329842932,
-      "support": 200.0
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 7.0
     }
   }
 }
