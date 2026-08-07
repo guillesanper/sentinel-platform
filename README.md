@@ -7,7 +7,10 @@
 
 ## 🎯 Overview
 
-**Sentinel** es una plataforma de detección de intrusiones que analiza logs de infraestructura en tiempo real para identificar:
+**Sentinel** es una plataforma de detección de intrusiones que analiza **dos modalidades de dato en
+paralelo**: eventos de log de infraestructura y flujos de red.
+
+**Track de eventos** — sobre logs de infraestructura en tiempo real:
 
 - 🔐 **Brute Force** - Intentos repetidos de autenticación
 - 🎭 **Credential Stuffing** - Uso de credenciales robadas
@@ -15,6 +18,14 @@
 - 🔀 **Lateral Movement** - Movimiento lateral en la red
 - 📤 **Data Exfiltration** - Exfiltración de datos
 - 🔍 **Reconnaissance** - Actividades de reconocimiento
+
+**Track de flujos** — sobre flujos de red bidireccionales (features CICFlowMeter, 78 columnas),
+con una cascada Isolation Forest → XGBoost entrenada sobre CICIDS2017:
+
+- 💥 **DoS / DDoS** · 🤖 **Botnet** · 🔓 **BruteForce** · 🔎 **Scan** · 🌐 **WebAttack**
+
+Los dos tracks tienen taxonomías, modelos y endpoints **separados a propósito** — ver
+[docs/ml/](./docs/ml/README.md).
 
 ## 🏗️ Architecture
 
@@ -69,10 +80,13 @@ sentinel-platform/
 │   └── overlays/             # Environment overlays
 ├── api/                      # FastAPI application
 ├── ml/                       # Machine Learning code
-│   ├── features/             # Feature engineering
-│   ├── models/               # Model definitions
-│   └── training/             # Training pipelines
+│   ├── features/             # Feature engineering (track de eventos)
+│   ├── models/               # Model definitions (track de eventos)
+│   ├── flow/                 # Track de flujos: loader, cascada, serving
+│   ├── evaluation/           # Métricas y figuras (compartido por ambos tracks)
+│   └── training/             # Training pipelines (train.py, train_cicids.py)
 ├── data/                     # Data schemas and generators
+├── docs/ml/                  # Documentación de ML + material del TFA CICIDS2017
 ├── observability/            # Monitoring configuration
 ├── scripts/                  # Utility scripts
 └── tests/                    # Test suites
@@ -160,6 +174,22 @@ uvicorn main:app --reload --port 8000
 curl http://localhost:8000/health
 ```
 
+### 6. Train Models
+
+```bash
+# Track de eventos (generador sintético, sin datos externos)
+python -m ml.training.train --n-samples 60000 --attack-ratio 0.2 \
+  --threshold-strategy fbeta --beta 2.0 --output-dir models --no-mlflow
+
+# Track de flujos (requiere los CSV de CICIDS2017 y ~8 GiB de RAM)
+python -m ml.training.train_cicids --data-dir api/csvs --sample-size 200000 \
+  --pipeline xgb --split temporal --skip-tuning --output-dir models/flow
+```
+
+Los CSV de CICIDS2017 (844 MB) **no se versionan**: se descargan de
+[UNB CIC](https://www.unb.ca/cic/datasets/ids-2017.html), distribución `MachineLearningCSV`.
+Detalles de opciones y resultados en [docs/ml/CICIDS2017-TRACK.md](./docs/ml/CICIDS2017-TRACK.md).
+
 ## 📊 API Endpoints
 
 | Endpoint | Method | Description |
@@ -168,7 +198,12 @@ curl http://localhost:8000/health
 | `/ready` | GET | Readiness check |
 | `/metrics` | GET | Prometheus metrics |
 | `/v1/predict` | POST | Analyze single event |
-| `/v1/analyze/batch` | POST | Analyze batch (max 100) |
+| `/v1/analyze/batch` | POST | Analyze batch of events (max 100) |
+| `/v1/predict/flow` | POST | Analyze single network flow |
+| `/v1/analyze/flow/batch` | POST | Analyze batch of flows (max 100) |
+
+Las rutas de flujo degradan **independientemente**: si no hay cascada de flujos cargada devuelven
+503, mientras las de eventos siguen sirviendo con normalidad.
 
 ### Example Request
 
@@ -199,6 +234,41 @@ curl -X POST http://localhost:8000/v1/predict \
     "Source IP from high-risk region",
     "Activity outside business hours"
   ]
+}
+```
+
+### Example Flow Request
+
+Las 78 features son individualmente opcionales (ausente → 0.0) y se reordenan **por nombre**, no
+por orden de aparición. Los metadatos van **fuera** de `features` y no entran al modelo:
+
+```bash
+curl -X POST http://localhost:8000/v1/predict/flow \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "features": {"Destination Port": 80, "Flow Duration": 1532000, "Total Fwd Packets": 12},
+    "src_ip": "192.168.10.5",
+    "dst_ip": "10.0.1.20",
+    "dst_port": 80,
+    "protocol": "TCP"
+  }'
+```
+
+```json
+{
+  "flow_id": "550e8400-e29b-41d4-a716-446655440000",
+  "threat_score": 0.91,
+  "severity": "CRITICAL",
+  "attack_type": "DDoS",
+  "confidence": 0.88,
+  "is_anomaly": true,
+  "explanation": [
+    "Flow deviates from benign traffic (anomaly score: 0.94)",
+    "Traffic pattern matches DDoS (97% confidence)",
+    "Very high throughput (42.0 MB/s)"
+  ],
+  "attack_probabilities": {"BENIGN": 0.01, "DDoS": 0.97, "DoS": 0.02}
 }
 ```
 
@@ -240,9 +310,11 @@ kubectl port-forward svc/grafana 3000:3000 -n sentinel-observability
 - [Guia de Migracion](./docs/MIGRATION_GUIDE.md) - Migracion desde deploy.sh
 - [Troubleshooting de Secrets](./docs/SECRETS_TROUBLESHOOTING.md) - Problemas con ESO
 - [Modulo Kubernetes Terraform](./infra/terraform/modules/kubernetes/README.md) - Configuracion de ESO
-- [Technical Design Document](./docs/SENTINEL_TECHNICAL_DESIGN.md)
-- [Architecture Decisions](./docs/adr/)
-- [Runbooks](./docs/runbooks/)
+- [Technical Design Document](./sentinel_doc.md) - Diseno tecnico completo (infra, ML, API, k8s, CI/CD)
+- [Documentacion de ML](./docs/ml/README.md) - Los dos tracks, resultados y su procedencia
+- [Track de flujos (CICIDS2017)](./docs/ml/CICIDS2017-TRACK.md) - Cascada, contrato de features, particion temporal, entrenamiento
+
+> Pendientes de escribir: `docs/adr/` (Architecture Decision Records) y `docs/runbooks/`.
 
 ## 🤝 Contributing
 

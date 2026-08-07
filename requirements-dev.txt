@@ -31,6 +31,16 @@ bandit==1.7.7
 safety>=3.2.0
 
 # ----------------------------------------------------------------------------
+# Plotting (ml/evaluation/plots.py only)
+# ----------------------------------------------------------------------------
+# Deliberately NOT in requirements.txt: api/Dockerfile copies ml/ wholesale and
+# installs only the production requirements, so keeping these here is what stops
+# ~120 MB of plotting stack (and its CVE surface) from reaching the API image.
+# The corollary is a hard rule: no package __init__ under ml/ may import plots.
+matplotlib==3.8.2
+seaborn==0.13.2
+
+# ----------------------------------------------------------------------------
 # Type Stubs
 # ----------------------------------------------------------------------------
 types-pyyaml==6.0.12.12

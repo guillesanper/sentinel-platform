@@ -1,0 +1,109 @@
+2026-06-22 01:48:50 [INFO    ] cicids2017.__main__ — ======================================================================
+2026-06-22 01:48:50 [INFO    ] cicids2017.__main__ — CICIDS2017 Intrusion Detection Experiment
+2026-06-22 01:48:50 [INFO    ] cicids2017.__main__ —   data_path   : data
+2026-06-22 01:48:50 [INFO    ] cicids2017.__main__ —   output_path : output
+2026-06-22 01:48:50 [INFO    ] cicids2017.__main__ —   seed        : 42
+2026-06-22 01:48:50 [INFO    ] cicids2017.__main__ —   sample_size : 1000000 (0 = full)
+2026-06-22 01:48:50 [INFO    ] cicids2017.__main__ —   pipeline    : all
+2026-06-22 01:48:50 [INFO    ] cicids2017.__main__ —   beta (IF)   : 2.00
+2026-06-22 01:48:50 [INFO    ] cicids2017.__main__ —   skip_eda    : False
+2026-06-22 01:48:50 [INFO    ] cicids2017.__main__ —   skip_tuning : False
+2026-06-22 01:48:50 [INFO    ] cicids2017.__main__ — ======================================================================
+2026-06-22 01:48:50 [INFO    ] cicids2017.utils.loader — Found 8 CSV file(s) in data
+2026-06-22 01:48:51 [DEBUG   ] cicids2017.utils.loader —   Loaded Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv: 225,745 rows × 79 cols
+2026-06-22 01:48:53 [DEBUG   ] cicids2017.utils.loader —   Loaded Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv: 286,467 rows × 79 cols
+2026-06-22 01:48:54 [DEBUG   ] cicids2017.utils.loader —   Loaded Friday-WorkingHours-Morning.pcap_ISCX.csv: 191,033 rows × 79 cols
+2026-06-22 01:48:58 [DEBUG   ] cicids2017.utils.loader —   Loaded Monday-WorkingHours.pcap_ISCX.csv: 529,918 rows × 79 cols
+2026-06-22 01:48:59 [DEBUG   ] cicids2017.utils.loader —   Loaded Thursday-WorkingHours-Afternoon-Infilteration.pcap_ISCX.csv: 288,602 rows × 79 cols
+2026-06-22 01:49:00 [DEBUG   ] cicids2017.utils.loader —   Loaded Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv: 170,366 rows × 79 cols
+2026-06-22 01:49:03 [DEBUG   ] cicids2017.utils.loader —   Loaded Tuesday-WorkingHours.pcap_ISCX.csv: 445,909 rows × 79 cols
+2026-06-22 01:49:08 [DEBUG   ] cicids2017.utils.loader —   Loaded Wednesday-workingHours.pcap_ISCX.csv: 692,703 rows × 79 cols
+2026-06-22 01:49:08 [INFO    ] cicids2017.utils.loader — Combined dataset: 2,830,743 rows × 79 cols
+2026-06-22 01:49:11 [INFO    ] cicids2017.utils.loader — Labels mapped to 7 canonical classes: ['BENIGN', 'Botnet', 'BruteForce', 'DDoS', 'DoS', 'Scan', 'WebAttack']
+2026-06-22 01:49:16 [INFO    ] cicids2017.utils.loader — Dropped 2,867 rows with NaN/Inf values
+2026-06-22 01:49:28 [INFO    ] cicids2017.utils.loader — Dropped 307,078 duplicate rows
+2026-06-22 01:49:29 [INFO    ] cicids2017.utils.loader — Clean dataset: 2,520,798 rows remaining (309,945 removed total)
+2026-06-22 01:49:30 [INFO    ] cicids2017.utils.loader — No minority classes detected — all classes retained
+2026-06-22 01:49:32 [INFO    ] cicids2017.utils.loader — Stratified sample: 2,520,798 → 1,000,001 rows
+2026-06-22 01:49:32 [INFO    ] cicids2017.utils.loader — Running EDA — generating figures...
+2026-06-22 01:49:33 [DEBUG   ] cicids2017.utils.loader — Saved output\eda\class_distribution.png
+2026-06-22 01:49:38 [DEBUG   ] cicids2017.utils.loader — Saved output\eda\feature_correlation.png
+2026-06-22 01:52:16 [DEBUG   ] cicids2017.utils.loader — Saved output\eda\feature_distributions.png
+2026-06-22 01:52:16 [INFO    ] cicids2017.utils.loader — EDA figures saved to output\eda
+2026-06-22 01:52:18 [INFO    ] cicids2017.utils.loader — Dataset split — train: 700,000 | val: 150,000 | test: 150,001
+2026-06-22 01:52:18 [DEBUG   ] cicids2017.utils.loader —   Class               train       val      test
+2026-06-22 01:52:18 [DEBUG   ] cicids2017.utils.loader —   BENIGN            581,776   124,666   124,667
+2026-06-22 01:52:18 [DEBUG   ] cicids2017.utils.loader —   Botnet                541       116       116
+2026-06-22 01:52:18 [DEBUG   ] cicids2017.utils.loader —   BruteForce          2,541       544       545
+2026-06-22 01:52:18 [DEBUG   ] cicids2017.utils.loader —   DDoS               35,548     7,618     7,617
+2026-06-22 01:52:18 [DEBUG   ] cicids2017.utils.loader —   DoS                53,804    11,529    11,530
+2026-06-22 01:52:18 [DEBUG   ] cicids2017.utils.loader —   Scan               25,195     5,399     5,399
+2026-06-22 01:52:18 [DEBUG   ] cicids2017.utils.loader —   WebAttack             595       128       127
+2026-06-22 01:52:18 [INFO    ] cicids2017.__main__ — Active classes (7): ['BENIGN', 'Botnet', 'BruteForce', 'DDoS', 'DoS', 'Scan', 'WebAttack']
+2026-06-22 01:52:18 [INFO    ] cicids2017.main.pipeline_a — ============================================================
+2026-06-22 01:52:18 [INFO    ] cicids2017.main.pipeline_a — Pipeline A: Isolation Forest + XGBoost
+2026-06-22 01:52:18 [INFO    ] cicids2017.main.pipeline_a — ============================================================
+2026-06-22 03:07:47 [INFO    ] cicids2017.main.pipeline_a — [Pipeline A] Test — accuracy=0.9936  f1_macro=0.9516  f1_weighted=0.9936
+2026-06-22 03:07:52 [INFO    ] cicids2017.main.pipeline_a — 
+[Pipeline A] Classification Report:
+              precision    recall  f1-score   support
+
+      BENIGN       0.99      1.00      1.00    124667
+      Botnet       0.62      0.99      0.76       116
+  BruteForce       0.99      0.99      0.99       545
+        DDoS       1.00      0.97      0.98      7617
+         DoS       1.00      0.96      0.98     11530
+        Scan       0.99      0.99      0.99      5399
+   WebAttack       0.94      0.98      0.96       127
+
+    accuracy                           0.99    150001
+   macro avg       0.93      0.98      0.95    150001
+weighted avg       0.99      0.99      0.99    150001
+
+2026-06-22 03:08:24 [INFO    ] cicids2017.main.pipeline_a — [Pipeline A] Completed in 4566.3s.
+2026-06-22 03:08:24 [INFO    ] cicids2017.main.pipeline_b — ============================================================
+2026-06-22 03:08:24 [INFO    ] cicids2017.main.pipeline_b — Pipeline B: Isolation Forest + NumPy Neural Network
+2026-06-22 03:08:24 [INFO    ] cicids2017.main.pipeline_b — ============================================================
+2026-06-22 03:50:42 [INFO    ] cicids2017.main.pipeline_b — [Pipeline B] Test — accuracy=0.9696  f1_macro=0.7508  f1_weighted=0.9747
+2026-06-22 03:50:47 [INFO    ] cicids2017.main.pipeline_b — 
+[Pipeline B] Classification Report:
+              precision    recall  f1-score   support
+
+      BENIGN       0.99      0.97      0.98    124667
+      Botnet       0.09      0.99      0.16       116
+  BruteForce       0.94      0.98      0.96       545
+        DDoS       1.00      0.97      0.98      7617
+         DoS       0.98      0.95      0.97     11530
+        Scan       0.75      0.99      0.85      5399
+   WebAttack       0.22      1.00      0.35       127
+
+    accuracy                           0.97    150001
+   macro avg       0.71      0.98      0.75    150001
+weighted avg       0.98      0.97      0.97    150001
+
+2026-06-22 03:51:19 [INFO    ] cicids2017.main.pipeline_b — [Pipeline B] Completed in 2574.7s.
+2026-06-22 03:51:19 [INFO    ] cicids2017.main.comparison — ============================================================
+2026-06-22 03:51:19 [INFO    ] cicids2017.main.comparison — Cross-pipeline comparison
+2026-06-22 03:51:19 [INFO    ] cicids2017.main.comparison — ============================================================
+2026-06-22 03:51:23 [INFO    ] cicids2017.evaluation.metrics — Comparing pipelines on 150001 test samples.
+2026-06-22 03:51:42 [INFO    ] cicids2017.evaluation.metrics — Pipeline comparison summary:
+  accuracy        — A=0.9936  B=0.9696  Δ=-0.0240  winner=pipeline_a
+  f1_macro        — A=0.9516  B=0.7508  Δ=-0.2008  winner=pipeline_a
+  f1_weighted     — A=0.9936  B=0.9747  Δ=-0.0189  winner=pipeline_a
+  f1_per_class (A vs B per class):
+    BENIGN               — A=0.9962  B=0.9815  Δ=-0.0146
+    Botnet               — A=0.7616  B=0.1588  Δ=-0.6027
+    BruteForce           — A=0.9909  B=0.9578  Δ=-0.0330
+    DDoS                 — A=0.9836  B=0.9819  Δ=-0.0017
+    DoS                  — A=0.9762  B=0.9687  Δ=-0.0074
+    Scan                 — A=0.9914  B=0.8523  Δ=-0.1391
+    WebAttack            — A=0.9615  B=0.3547  Δ=-0.6068
+2026-06-22 03:51:42 [INFO    ] cicids2017.main.comparison — IF Stage-1 — Pipeline A: precision=0.2467 recall=0.9682 FPR=0.6008 FNR=0.0318
+2026-06-22 03:51:42 [INFO    ] cicids2017.main.comparison — IF Stage-1 — Pipeline B: precision=0.2467 recall=0.9682 FPR=0.6008 FNR=0.0318
+2026-06-22 03:51:45 [INFO    ] cicids2017.__main__ — ======================================================================
+2026-06-22 03:51:45 [INFO    ] cicids2017.__main__ — RESUMEN FINAL DE MÉTRICAS
+2026-06-22 03:51:45 [INFO    ] cicids2017.__main__ — Pipeline A — F1-macro: 0.9516 | F1-weighted: 0.9936 | Accuracy: 0.9936
+2026-06-22 03:51:45 [INFO    ] cicids2017.__main__ — Pipeline B — F1-macro: 0.7508 | F1-weighted: 0.9747 | Accuracy: 0.9696
+2026-06-22 03:51:45 [INFO    ] cicids2017.__main__ — Experiment complete in 7375.4s.
+2026-06-22 03:51:45 [INFO    ] cicids2017.__main__ — Full log: output\results.txt
+2026-06-22 03:51:45 [INFO    ] cicids2017.__main__ — ======================================================================

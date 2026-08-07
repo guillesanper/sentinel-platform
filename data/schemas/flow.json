@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinel-platform.example.com/schemas/flow.json",
+  "title": "NetworkFlow",
+  "description": "A network flow to be analyzed by the Sentinel intrusion detection system. Sits alongside event.json: the two describe different data modalities and are scored by different models. A flow carries 78 CICFlowMeter features and is classified into BENIGN|Botnet|BruteForce|DDoS|DoS|Scan|WebAttack; an event carries 25 features and is classified into normal|brute_force|... The two taxonomies must never be mixed.",
+  "type": "object",
+  "required": ["features"],
+  "properties": {
+    "features": {
+      "$ref": "#/$defs/FlowFeatures"
+    },
+    "src_ip": {
+      "type": "string",
+      "format": "ipv4",
+      "description": "Source IP address. Context only: it never reaches the model, but it appears in the explanation and the log."
+    },
+    "dst_ip": {
+      "type": "string",
+      "format": "ipv4",
+      "description": "Destination IP address. Context only, like src_ip."
+    },
+    "dst_port": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535,
+      "description": "Destination port as observed on the wire. Context only — note that the model does read a 'Destination Port' feature, which is a separate field inside 'features'."
+    },
+    "protocol": {
+      "type": "string",
+      "maxLength": 16,
+      "description": "Transport protocol. Context only.",
+      "examples": ["TCP", "UDP"]
+    }
+  },
+  "$defs": {
+    "FlowFeatures": {
+      "type": "object",
+      "title": "FlowFeatures",
+      "description": "CICFlowMeter feature name to numeric value. Everything the model reads lives in here and nowhere else, so a metadata field added to the parent object can never become a feature by accident.\n\nThree properties of this object are load-bearing:\n\n1. ORDER IS IRRELEVANT. The extractor reorders by name. A client may serialise the keys any way it likes.\n\n2. FEATURES MAY BE OMITTED. An absent feature defaults to 0.0, so a partial flow is accepted. Unknown names are ignored — but a payload sharing NO name with the contract is rejected, because it would otherwise be scored as an all-zero flow and answered with confidence.\n\n3. 'Fwd Header Length.1' IS NOT A TYPO. The raw CICIDS2017 CSVs spell 'Fwd Header Length' twice — a known CICFlowMeter artifact — and the '.1' suffix is what pandas appends on read. Since a JSON object cannot carry the same key twice, that pandas spelling is the canonical wire name. 'Fwd Header Length 1' is accepted as an alias.\n\nThe authoritative list of the 78 names, in the canonical order, is FLOW_FEATURE_NAMES in ml/flow/features.py.",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "number"
+      },
+      "properties": {
+        "Destination Port": { "type": "number" },
+        "Flow Duration": {
+          "type": "number",
+          "description": "Flow duration in MICROSECONDS."
+        },
+        "Total Fwd Packets": { "type": "number" },
+        "Total Backward Packets": { "type": "number" },
+        "Total Length of Fwd Packets": { "type": "number" },
+        "Total Length of Bwd Packets": { "type": "number" },
+        "Fwd Packet Length Max": { "type": "number" },
+        "Fwd Packet Length Min": { "type": "number" },
+        "Fwd Packet Length Mean": { "type": "number" },
+        "Fwd Packet Length Std": { "type": "number" },
+        "Bwd Packet Length Max": { "type": "number" },
+        "Bwd Packet Length Min": { "type": "number" },
+        "Bwd Packet Length Mean": { "type": "number" },
+        "Bwd Packet Length Std": { "type": "number" },
+        "Flow Bytes/s": { "type": "number" },
+        "Flow Packets/s": { "type": "number" },
+        "Flow IAT Mean": { "type": "number" },
+        "Flow IAT Std": { "type": "number" },
+        "Flow IAT Max": { "type": "number" },
+        "Flow IAT Min": { "type": "number" },
+        "Fwd IAT Total": { "type": "number" },
+        "Fwd IAT Mean": { "type": "number" },
+        "Fwd IAT Std": { "type": "number" },
+        "Fwd IAT Max": { "type": "number" },
+        "Fwd IAT Min": { "type": "number" },
+        "Bwd IAT Total": { "type": "number" },
+        "Bwd IAT Mean": { "type": "number" },
+        "Bwd IAT Std": { "type": "number" },
+        "Bwd IAT Max": { "type": "number" },
+        "Bwd IAT Min": { "type": "number" },
+        "Fwd PSH Flags": { "type": "number" },
+        "Bwd PSH Flags": { "type": "number" },
+        "Fwd URG Flags": { "type": "number" },
+        "Bwd URG Flags": { "type": "number" },
+        "Fwd Header Length": { "type": "number" },
+        "Bwd Header Length": { "type": "number" },
+        "Fwd Packets/s": { "type": "number" },
+        "Bwd Packets/s": { "type": "number" },
+        "Min Packet Length": { "type": "number" },
+        "Max Packet Length": { "type": "number" },
+        "Packet Length Mean": { "type": "number" },
+        "Packet Length Std": { "type": "number" },
+        "Packet Length Variance": { "type": "number" },
+        "FIN Flag Count": { "type": "number" },
+        "SYN Flag Count": { "type": "number" },
+        "RST Flag Count": { "type": "number" },
+        "PSH Flag Count": { "type": "number" },
+        "ACK Flag Count": { "type": "number" },
+        "URG Flag Count": { "type": "number" },
+        "CWE Flag Count": { "type": "number" },
+        "ECE Flag Count": { "type": "number" },
+        "Down/Up Ratio": { "type": "number" },
+        "Average Packet Size": { "type": "number" },
+        "Avg Fwd Segment Size": { "type": "number" },
+        "Avg Bwd Segment Size": { "type": "number" },
+        "Fwd Header Length.1": {
+          "type": "number",
+          "description": "The second 'Fwd Header Length' column of the raw CSVs. Not a duplicate to be removed — see the description of this object."
+        },
+        "Fwd Header Length 1": {
+          "type": "number",
+          "description": "Dot-free alias of 'Fwd Header Length.1'. Do not send both."
+        },
+        "Fwd Avg Bytes/Bulk": { "type": "number" },
+        "Fwd Avg Packets/Bulk": { "type": "number" },
+        "Fwd Avg Bulk Rate": { "type": "number" },
+        "Bwd Avg Bytes/Bulk": { "type": "number" },
+        "Bwd Avg Packets/Bulk": { "type": "number" },
+        "Bwd Avg Bulk Rate": { "type": "number" },
+        "Subflow Fwd Packets": { "type": "number" },
+        "Subflow Fwd Bytes": { "type": "number" },
+        "Subflow Bwd Packets": { "type": "number" },
+        "Subflow Bwd Bytes": { "type": "number" },
+        "Init_Win_bytes_forward": { "type": "number" },
+        "Init_Win_bytes_backward": { "type": "number" },
+        "act_data_pkt_fwd": { "type": "number" },
+        "min_seg_size_forward": { "type": "number" },
+        "Active Mean": { "type": "number" },
+        "Active Std": { "type": "number" },
+        "Active Max": { "type": "number" },
+        "Active Min": { "type": "number" },
+        "Idle Mean": { "type": "number" },
+        "Idle Std": { "type": "number" },
+        "Idle Max": { "type": "number" },
+        "Idle Min": { "type": "number" }
+      }
+    }
+  },
+  "examples": [
+    {
+      "features": {
+        "Destination Port": 80,
+        "Flow Duration": 1532000,
+        "Total Fwd Packets": 12,
+        "Total Backward Packets": 10,
+        "Total Length of Fwd Packets": 1420,
+        "Total Length of Bwd Packets": 8600,
+        "Flow Bytes/s": 6540.4,
+        "Flow Packets/s": 14.3,
+        "Flow IAT Mean": 72952.4,
+        "SYN Flag Count": 1,
+        "ACK Flag Count": 20,
+        "Min Packet Length": 0,
+        "Max Packet Length": 1460,
+        "Average Packet Size": 455.5,
+        "Init_Win_bytes_forward": 8192,
+        "Init_Win_bytes_backward": 229
+      },
+      "src_ip": "192.168.10.5",
+      "dst_ip": "10.0.1.20",
+      "dst_port": 80,
+      "protocol": "TCP"
+    },
+    {
+      "features": {
+        "Destination Port": 22,
+        "Flow Duration": 214,
+        "Total Fwd Packets": 1,
+        "Total Backward Packets": 0,
+        "Total Length of Fwd Packets": 0,
+        "Flow Bytes/s": 0,
+        "Flow Packets/s": 4672.9,
+        "SYN Flag Count": 1,
+        "ACK Flag Count": 0,
+        "RST Flag Count": 1,
+        "Min Packet Length": 0,
+        "Max Packet Length": 0,
+        "Init_Win_bytes_forward": 1024,
+        "Init_Win_bytes_backward": -1
+      },
+      "src_ip": "172.16.0.1",
+      "dst_ip": "192.168.10.50",
+      "dst_port": 22,
+      "protocol": "TCP"
+    }
+  ]
+}

@@ -13,6 +13,8 @@ Usage:
 import json
 import logging
 import sys
+from collections import Counter
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -37,10 +39,13 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from ml.features.pipeline import CombinedFeatureExtractor, FeatureExtractor  # noqa: E402
-from ml.models.anomaly_detector import AnomalyDetector  # noqa: E402
+from ml.models.anomaly_detector import NORMAL_LABEL, AnomalyDetector  # noqa: E402
 from ml.models.classifier import ATTACK_TYPES, LABEL_TO_IDX, AttackClassifier  # noqa: E402
 
 logger = structlog.get_logger()
+
+# Threshold-tuning strategies exposed by --threshold-strategy.
+THRESHOLD_STRATEGIES = ["recall", "fbeta", "none"]
 
 # Binary classification labels (normal vs attack)
 BINARY_ATTACK_TYPES = ["normal", "brute_force"]
@@ -314,6 +319,98 @@ def load_or_generate_data_with_campaigns(
     )
 
     return X, y, labels
+
+
+# ============================================================================
+# Splitting
+# ============================================================================
+
+
+def to_anomaly_labels(labels: Sequence[str]) -> np.ndarray:
+    """
+    Turn string class labels into the binary indicator the detector expects.
+
+    Args:
+        labels: Canonical class names, e.g. ``["normal", "brute_force", ...]``.
+
+    Returns:
+        Integer array of shape ``(len(labels),)``: 0 = normal, 1 = attack.
+    """
+    return np.array([0 if label == NORMAL_LABEL else 1 for label in labels], dtype=int)
+
+
+def split_train_val_test(
+    X: np.ndarray,
+    y: np.ndarray,
+    labels: Sequence[str],
+    test_size: float,
+    val_size: float,
+    seed: int,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    list[str],
+    list[str],
+    list[str],
+]:
+    """
+    Split into train/val/test carrying the string labels through **both** cuts.
+
+    ``labels`` travelling alongside ``X`` is the whole point of this function.
+    Both cuts shuffle (sklearn's default), so a label array that is not passed
+    into ``train_test_split`` cannot be re-aligned afterwards by slicing — the
+    permutation is not recoverable. Threshold optimisation reads its ground
+    truth from ``labels_val``, so a misalignment there tunes the operating point
+    against noise and reports a recall that means nothing.
+
+    Args:
+        X: Feature matrix of shape ``(n_samples, n_features)``.
+        y: Encoded labels of shape ``(n_samples,)``, used for stratification.
+        labels: String class names aligned with ``X``.
+        test_size: Fraction of the whole set held out for test.
+        val_size: Fraction of the *remaining* training set held out for
+            validation.
+        seed: Random seed for both cuts.
+
+    Returns:
+        ``(X_train, X_val, X_test, y_train, y_val, y_test,
+        labels_train, labels_val, labels_test)``.
+    """
+    labels_array = np.asarray(labels, dtype=object)
+
+    X_train_full, X_test, y_train_full, y_test, labels_train_full, labels_test = train_test_split(
+        X,
+        y,
+        labels_array,
+        test_size=test_size,
+        random_state=seed,
+        stratify=y,
+    )
+
+    X_train, X_val, y_train, y_val, labels_train, labels_val = train_test_split(
+        X_train_full,
+        y_train_full,
+        labels_train_full,
+        test_size=val_size,
+        random_state=seed,
+        stratify=y_train_full,
+    )
+
+    return (
+        X_train,
+        X_val,
+        X_test,
+        y_train,
+        y_val,
+        y_test,
+        list(labels_train),
+        list(labels_val),
+        list(labels_test),
+    )
 
 
 # ============================================================================
@@ -726,13 +823,28 @@ def log_to_mlflow(
 @click.option(
     "--optimize-threshold/--no-optimize-threshold",
     default=True,
-    help="Optimize anomaly threshold for target recall.",
+    help="Tune the anomaly threshold on the validation set. "
+    "--no-optimize-threshold forces --threshold-strategy none.",
+)
+@click.option(
+    "--threshold-strategy",
+    type=click.Choice(THRESHOLD_STRATEGIES),
+    default="recall",
+    help="How to tune the anomaly threshold: 'recall' pins recall to "
+    "--target-recall, 'fbeta' maximizes F-beta for --beta, 'none' keeps the "
+    "contamination percentile from fit().",
 )
 @click.option(
     "--target-recall",
     type=float,
     default=0.8,
-    help="Target recall for anomaly detection (0.8 = detect 80%% of attacks).",
+    help="Target recall for --threshold-strategy recall (0.8 = detect 80%% of attacks).",
+)
+@click.option(
+    "--beta",
+    type=float,
+    default=2.0,
+    help="Recall weight for --threshold-strategy fbeta. >1 favours recall, <1 favours precision.",
 )
 @click.option(
     "--seed",
@@ -755,7 +867,7 @@ def log_to_mlflow(
     default=True,
     help="Use window features (25 total) for better brute_force vs credential_stuffing distinction.",
 )
-def main(  # noqa: PLR0915
+def main(  # noqa: PLR0912, PLR0915
     data_path: str | None,
     csv_path: str | None,
     binary: bool,
@@ -770,7 +882,9 @@ def main(  # noqa: PLR0915
     learning_rate: float,
     class_weight: str,
     optimize_threshold: bool,
+    threshold_strategy: str,
     target_recall: float,
+    beta: float,
     seed: int,
     mlflow: bool,
     verbose: bool,
@@ -796,6 +910,9 @@ def main(  # noqa: PLR0915
 
         # Train with custom parameters
         python -m ml.training.train --n-estimators 200 --max-depth 8
+
+        # Tune the anomaly threshold for F-beta instead of a fixed recall target
+        python -m ml.training.train --threshold-strategy fbeta --beta 2.0
     """
     # Setup logging
     log_level_name = "DEBUG" if verbose else "INFO"
@@ -844,23 +961,26 @@ def main(  # noqa: PLR0915
             seed=seed,
         )
 
-    # Split data
-    X_train_full, X_test, y_train_full, y_test, labels_train_full, labels_test = train_test_split(
+    # Split data. The string labels are carried through *both* cuts: the
+    # threshold optimisation below reads its ground truth from labels_val, and
+    # both cuts shuffle, so a label array left behind cannot be realigned.
+    (
+        X_train,
+        X_val,
+        X_test,
+        y_train,
+        y_val,
+        y_test,
+        labels_train,
+        labels_val,
+        labels_test,
+    ) = split_train_val_test(
         X,
         y,
         labels,
         test_size=test_size,
-        random_state=seed,
-        stratify=y,
-    )
-
-    # Further split training into train and validation
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_train_full,
-        y_train_full,
-        test_size=val_size,
-        random_state=seed,
-        stratify=y_train_full,
+        val_size=val_size,
+        seed=seed,
     )
 
     logger.info(
@@ -871,9 +991,7 @@ def main(  # noqa: PLR0915
     )
 
     # Print class distribution
-    from collections import Counter
-
-    train_dist = Counter([labels[i] for i in range(len(labels)) if i < len(X_train_full)])
+    train_dist = Counter(labels_train)
     logger.info("class_distribution", distribution=dict(train_dist))
 
     # Calculate actual contamination (proportion of attacks in data)
@@ -902,22 +1020,38 @@ def main(  # noqa: PLR0915
         random_state=seed,
     )
 
-    # Optimize threshold for target recall
-    if optimize_threshold:
-        print(f"Optimizing threshold for {target_recall:.0%} recall...")
-        # Create binary labels for anomaly detection (0=normal, 1=attack)
-        y_val_binary = np.array([0 if label == "normal" else 1 for label in labels_train_full])
-        # Use validation set indices
-        val_start = len(X_train)
-        val_end = val_start + len(X_val)
-        y_val_anomaly = y_val_binary[val_start:val_end]
+    # Tune the decision threshold. --no-optimize-threshold still wins over
+    # --threshold-strategy, so the older invocation keeps its meaning.
+    strategy = threshold_strategy if optimize_threshold else "none"
 
+    # Binary ground truth for the validation rows, taken from the labels the
+    # split carried along with X_val — never re-derived by slicing.
+    y_val_anomaly = to_anomaly_labels(labels_val)
+    operating_point: dict[str, Any] | None = None
+
+    if strategy == "recall":
+        print(f"Optimizing threshold for {target_recall:.0%} recall...")
         detector.optimize_threshold_for_recall(
             X_val=X_val,
             y_val=y_val_anomaly,
             target_recall=target_recall,
         )
         print(f"Threshold optimized: {detector._threshold:.4f}")
+    elif strategy == "fbeta":
+        print(f"Optimizing threshold for F-{beta:g}...")
+        detector.optimize_threshold_fbeta(
+            X_val=X_val,
+            y_val=y_val_anomaly,
+            beta=beta,
+        )
+        operating_point = detector.get_operating_point_info()
+        print(
+            f"Threshold optimized: {detector._threshold:.4f} "
+            f"(precision {operating_point['precision']:.4f}, "
+            f"recall {operating_point['recall']:.4f})"
+        )
+    else:
+        print("Threshold optimization disabled; keeping the contamination percentile.")
 
     # Save anomaly detector
     detector_path = output_path / "anomaly_detector.joblib"
@@ -1009,6 +1143,7 @@ def main(  # noqa: PLR0915
             "learning_rate": learning_rate,
             "seed": seed,
             "data_source": data_source,
+            "threshold_strategy": strategy,
         }
 
         run_id = log_to_mlflow(
@@ -1042,6 +1177,16 @@ def main(  # noqa: PLR0915
             "max_depth": max_depth,
             "learning_rate": learning_rate,
             "seed": seed,
+        },
+        "threshold": {
+            "strategy": strategy,
+            "value": float(detector._threshold),
+            "target_recall": target_recall if strategy == "recall" else None,
+            "beta": beta if strategy == "fbeta" else None,
+            # Only the F-beta search measures an operating point. The other two
+            # strategies never computed one, and inventing it here would be a
+            # fabricated number in the training record.
+            "operating_point": operating_point,
         },
         "metrics": metrics,
         "model_paths": {

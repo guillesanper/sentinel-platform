@@ -91,10 +91,46 @@ logs/
 .DS_Store
 Thumbs.db
 
+# ============================================================================
+# Datasets
+# ============================================================================
+# CICIDS2017 is 844 MB of CSV. `api/Dockerfile` does `COPY api/ ./api/` and
+# `COPY data/ ./data/`, so without this rule the whole capture ends up inside
+# the production image.
+#
+# The rule is global rather than scoped to `api/csvs/` on purpose:
+# `FlowConfig.data_path` defaults to `data/`, so a dataset dropped in the
+# default location would reintroduce the problem under a different path.
+# Training reads these from the host or a mounted volume; serving never reads a
+# CSV at all.
+#
+# `**/` is required, not decorative. Docker follows Go's filepath.Match, where
+# `*` does NOT cross a directory separator, so a bare `*.csv` excludes only
+# root-level files and would leave every one of the 844 MB in place. Verified
+# by build: with `*.csv`, `api/csvs/*.csv` and `data/*.csv` both still landed
+# in the image.
+**/*.csv
+
 # Models (will be mounted or downloaded)
 models/*.joblib
 models/*.pkl
 models/*.h5
+
+# ============================================================================
+# ML modules the API image cannot use
+# ============================================================================
+# `api/Dockerfile` copies `ml/` wholesale but installs only
+# `requirements.txt`, where matplotlib and seaborn are deliberately absent
+# (~120 MB and a large CVE surface for a security product). Nothing in the
+# serving path imports these, so they are excluded rather than shipped dead.
+#
+# `cascade_mlp.py` goes too: it is `neural_network.py`'s only consumer, and
+# shipping a module whose import target is missing would be worse than
+# shipping neither. It is the experimental branch of the flow track
+# (F1-macro 0.7508 against 0.9516) and never enters serving.
+ml/evaluation/plots.py
+ml/flow/models/neural_network.py
+ml/flow/pipelines/cascade_mlp.py
 
 # MLflow
 mlruns/

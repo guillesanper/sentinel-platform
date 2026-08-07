@@ -527,6 +527,22 @@ resource "google_service_account_iam_member" "api_workload_identity" {
 
 # 4. Data Pipeline
 
+Sentinel ingiere **dos modalidades de dato**, con esquemas y pipelines separados:
+
+| Modalidad | Esquema | Pipeline de features | Track |
+|---|---|---|---|
+| Evento de log | [`data/schemas/event.json`](./data/schemas/event.json) | `ml/features/pipeline.py` (25 features derivadas) | §5.1–§5.6 |
+| Flujo de red | [`data/schemas/flow.json`](./data/schemas/flow.json) | `ml/flow/features.py` (78 columnas CICFlowMeter) | §5.7 |
+
+El resto de §4 describe la modalidad de **evento**. Para la de flujo, el JSON Schema (draft
+2020-12) de `flow.json` define un objeto `features` con las 78 columnas —todas opcionales,
+ausente → 0.0— más metadatos opcionales (`src_ip`, `dst_ip`, `dst_port`, `protocol`) que **quedan
+fuera del vector del modelo** y solo alimentan la explicación y el log. Esa separación es
+estructural, no una denylist: nada fuera de `features` puede llegar al modelo, así que añadir un
+campo de contexto no puede contaminarlo por olvido. Un payload cuyas claves no incluyan **ningún**
+nombre reconocido se rechaza con 422, para que un cliente con el esquema equivocado no reciba un
+vector de ceros puntuado como flujo real.
+
 ## 4.1 Log Schema (Unified)
 
 ```json
@@ -730,8 +746,8 @@ class FeatureExtractor:
                     │                             │
                     │ final_score = weighted_avg( │
                     │   anomaly * 0.3,            │
-                    │   classifier * 0.4,         │
-                    │   rules * 0.3               │
+                    │   classifier * 0.5,         │
+                    │   rules * 0.2               │
                     │ )                           │
                     └─────────────────────────────┘
                                │
@@ -747,6 +763,12 @@ class FeatureExtractor:
                     └─────────────────────────────┘
 ```
 
+Los pesos `0.3 / 0.5 / 0.2` son los del código
+([`ml/models/fusion.py`](./ml/models/fusion.py)) y **los mismos que usa el track de flujos**
+([`ml/flow/fusion.py`](./ml/flow/fusion.py)), que combina las dos etapas de su cascada con el
+mismo reparto. `FusionLayer` normaliza los pesos si no suman 1 y lo registra con
+`fusion_weights_not_normalized`.
+
 ## 5.2 Model Selection Rationale
 
 | Model | Purpose | Why |
@@ -755,11 +777,36 @@ class FeatureExtractor:
 | **XGBoost** | Classification | Handles imbalance, interpretable, production-proven |
 | **Rule Engine** | Known patterns | Zero false negatives for critical signatures |
 
-**Why NOT Deep Learning:**
-- Security requires explainability
-- Dataset sizes don't justify complexity
+**Why NOT Deep Learning — evidencia medida, no preferencia**
+
+El track de flujos (§5.7) permitió contrastar las dos opciones sobre el **mismo** conjunto de test:
+1.000.001 flujos reales de CICIDS2017, test de 150.001, con Stage 1 idéntico en ambas cascadas.
+Stage 2 es la única variable: XGBoost contra una red neuronal (MLP con BatchNorm, Adam, focal loss
+y dropout).
+
+| Stage 2 | Accuracy | F1-macro | F1-weighted |
+|---------|----------|----------|-------------|
+| **XGBoost** | 0.9936 | **0.9516** | 0.9936 |
+| MLP | 0.9696 | **0.7508** | 0.9747 |
+
+Los 20 puntos de F1-macro los pierde la red **en las clases minoritarias**, que son justamente las
+que importan: Botnet 0.1588 contra 0.7616, WebAttack 0.3547 contra 0.9615. El F1-weighted casi
+empata (0.9747 vs 0.9936) porque lo domina BENIGN — es la métrica que haría parecer competitiva a
+la red y por eso no es la que decide.
+
+> Ambas cifras son **cotas optimistas**: proceden del protocolo con split aleatorio, que filtra
+> casi-duplicados de la misma ráfaga entre train y test. Eso **no invalida la comparación** —
+> ambos modelos pagan el mismo sesgo sobre el mismo split—, pero ninguno de los dos números estima
+> el rendimiento sobre tráfico no visto. Con partición temporal, XGBoost cae a 0.2809 de F1-macro.
+> Detalle completo en [docs/ml/README.md](./docs/ml/README.md#resultados).
+
+A la evidencia se suman las razones operativas, que no cambian:
+- Security requires explainability (XGBoost da importancia de features directamente)
 - Lower operational overhead
 - Easier debugging in incident response
+
+La red neuronal **se conserva** en `ml/flow/models/neural_network.py` por valor académico
+(implementación en NumPy puro), fuera de la ruta de serving y fuera de la imagen de producción.
 
 ## 5.3 Anomaly Detector
 
@@ -976,6 +1023,98 @@ registry:
                     └─────────────────────────────────────────┘
 ```
 
+> **Nota de honestidad:** el VALIDATION GATE está **documentado pero no implementado**. Ningún
+> code path de `ml/training/train.py` compara las métricas contra esos umbrales ni bloquea la
+> promoción. Queda como mejora identificada (~25 líneas), no como comportamiento actual.
+
+## 5.7 Flow-Based Track (CICIDS2017)
+
+Sentinel detecta intrusiones sobre **dos modalidades de dato en paralelo**. Todo lo anterior en §5
+describe el track de **eventos de log**. El track de **flujos de red** es independiente: otra
+ontología, otra taxonomía, otros artefactos y otros endpoints.
+
+| | Track de eventos | Track de flujos |
+|---|---|---|
+| Unidad | Evento de log | Flujo bidireccional (CICFlowMeter) |
+| Esquema | `data/schemas/event.json` | `data/schemas/flow.json` |
+| Features | 25 derivadas | 78 columnas CICFlowMeter |
+| Taxonomía | `normal`, `brute_force`, … (7) | `BENIGN`, `Botnet`, `BruteForce`, `DDoS`, `DoS`, `Scan`, `WebAttack` |
+| Topología | **Ensemble** (3 detectores en paralelo → fusión) | **Cascada** (Stage 1 → Stage 2 → fusión) |
+| Código | `ml/models/`, `ml/features/` | `ml/flow/` |
+| Entrenamiento | `python -m ml.training.train` | `python -m ml.training.train_cicids` |
+| Artefactos | `models/` | `models/flow/` |
+| Datos | Generador sintético | CICIDS2017 (2,83 M de flujos reales) |
+
+### Arquitectura de cascada
+
+```
+flujo (78 features)
+      │
+      ▼
+┌──────────────────────────┐
+│ STAGE 1                  │  Isolation Forest, no supervisado.
+│ FlowAnomalyDetector      │  Umbral por F-beta (β=2): penaliza los
+└──────┬───────────────────┘  ataques no detectados.
+       │
+  ¿anómalo? ── NO ──►  BENIGN. Stage 2 nunca lo ve.
+       │
+      SÍ
+       ▼
+┌──────────────────────────┐
+│ STAGE 2                  │  XGBoost multiclase (7 familias).
+│ FlowAttackClassifier     │
+└──────┬───────────────────┘
+       ▼
+┌──────────────────────────┐
+│ FlowFusionLayer          │  0.3 anomalía + 0.5 clasificación + 0.2 reglas
+└──────────────────────────┘
+```
+
+A diferencia del ensemble de eventos, **el recall de Stage 1 es un techo duro**: lo que Stage 1
+deja pasar como benigno no llega a Stage 2 y no tiene segunda oportunidad. De ahí el umbral con
+β=2 en vez de F1.
+
+### Taxonomías separadas a propósito
+
+Las dos listas tienen 7 entradas y `brute_force` se parece a `BruteForce`, pero **unificarlas sería
+un error**. `AttackClassifier._encode_labels` mapea etiqueta desconocida → `normal` **en silencio**:
+alimentar el clasificador de eventos con etiquetas CICIDS produce un modelo que predice `normal`
+para todo, entrena sin lanzar una excepción y pasa cualquier smoke que mire el exit code. Módulos
+y clases separados lo hacen imposible por construcción.
+
+### Partición temporal
+
+El TFA de origen usaba un `train_test_split` estratificado **por fila** sobre una captura continua,
+lo que filtra casi-duplicados de la misma ráfaga entre train y test. El track de sentinel corta
+**70/15/15 cronológicamente dentro de cada bloque `(día de captura, clase)`** (`--split temporal`,
+el default). El impacto medido, mismo comando salvo el `--split`:
+
+| Split | Accuracy | F1-macro | F1-weighted |
+|---|---|---|---|
+| `random` (protocolo del TFA) | 0.9934 | **0.9166** | 0.9935 |
+| `temporal` (default) | 0.8783 | **0.2809** | 0.8439 |
+
+**Esa caída no es una regresión: es la magnitud de la fuga que el protocolo anterior ocultaba.**
+
+### Contrato de features
+
+`FLOW_FEATURE_NAMES` congela las 78 columnas en orden canónico. El extractor reordena **por
+nombre**, y `CascadeInferenceService.load()` valida la lista persistida en el artefacto contra esa
+constante, fallando con `FeatureContractError` si difiere en longitud, contenido **u orden**. Es la
+defensa contra el fallo más caro del diseño: un desajuste de orden entre entrenamiento e inferencia
+**no lanza ninguna excepción**, solo produce predicciones basura con forma perfectamente válida.
+
+### Degradación independiente
+
+- **`/ready` lo decide solo el track de eventos.** Los checks `flow_detector` y `flow_classifier`
+  se reportan pero **no cambian el código de estado**: un modelo de flujo ausente no puede sacar el
+  pod de servicio y llevarse por delante los endpoints de eventos.
+- Sin cascada cargada, las rutas de flujo devuelven **503** y las de eventos siguen en **200**.
+- `PREDICTION_SCORE` y `ATTACK_TYPE_COUNT` ganan una etiqueta **`track`** (`event`|`flow`); no hay
+  colectores duplicados y las queries existentes siguen funcionando porque agregan con `sum(...)`.
+
+Documentación completa del track: [docs/ml/CICIDS2017-TRACK.md](./docs/ml/CICIDS2017-TRACK.md).
+
 ---
 
 # 6. API Layer
@@ -986,9 +1125,15 @@ registry:
 |----------|--------|-------------|------|------------|
 | `/v1/predict` | POST | Single event analysis | JWT | 100/min |
 | `/v1/analyze/batch` | POST | Batch analysis (max 100) | JWT | 10/min |
+| `/v1/predict/flow` | POST | Single network flow analysis (§5.7) | JWT | 100/min |
+| `/v1/analyze/flow/batch` | POST | Batch flow analysis (max 100) | JWT | 10/min |
 | `/health` | GET | Health check | None | 1000/min |
 | `/ready` | GET | Readiness check | None | 1000/min |
 | `/metrics` | GET | Prometheus metrics | None | 60/min |
+
+Las dos rutas de flujo devuelven **503** si no hay cascada cargada, de forma **independiente** de
+las rutas de evento. `/v1/analyze/flow/batch` no itera predicciones individuales: pasa la matriz
+entera a `predict_batch`, así que cien flujos son dos invocaciones de modelo, no doscientas.
 
 ## 6.2 Request/Response Schema
 

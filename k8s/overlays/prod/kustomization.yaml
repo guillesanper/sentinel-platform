@@ -1,7 +1,11 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-namespace: platform
+# No top-level `namespace:` — see the long note in the dev overlay. In short:
+# setting it broke the render outright (the three Namespace objects from
+# `base/namespaces/` all collapsed onto `platform`), and had it worked it would
+# have dragged the `ml` namespace's CronJobs, PVCs, RBAC and NetworkPolicies
+# into `platform`. Every base resource declares its own namespace already.
 
 resources:
   - ../../base

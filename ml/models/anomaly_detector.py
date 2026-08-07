@@ -6,17 +6,58 @@ malicious activity or novel attack vectors.
 """
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import joblib
 import numpy as np
 import structlog
 from sklearn.ensemble import IsolationForest
+from sklearn.metrics import confusion_matrix, fbeta_score
 
 logger = structlog.get_logger()
 
 # Default model path
 DEFAULT_MODEL_PATH = Path("models/anomaly_detector.joblib")
+
+# Artifact format written by save(). 1.1.0 adds "threshold_info"; load() still
+# accepts 1.0.0 files, which simply carry no operating point.
+ARTIFACT_VERSION: Final[str] = "1.1.0"
+
+# Number of candidate thresholds scanned by optimize_threshold_fbeta. 300 over
+# the observed score range is finer than the resolution the metric can
+# distinguish on any realistic validation set.
+DEFAULT_THRESHOLD_CANDIDATES: Final[int] = 300
+
+# Label of the negative class when y_val arrives as strings rather than 0/1.
+NORMAL_LABEL: Final[str] = "normal"
+
+
+def _binarize_labels(y: np.ndarray) -> np.ndarray:
+    """
+    Normalise validation labels to a 0/1 anomaly indicator.
+
+    The event track hands down labels in two shapes and they are told apart by
+    dtype, never by guessing:
+
+    * numeric — already the binary indicator, 0 = normal, 1 = attack;
+    * strings — canonical class names, anything but ``"normal"`` is an attack.
+
+    ``dtype=object`` arrays are inspected element-wise, because numpy reports
+    ``O`` for both a list of ints and a list of class names, and treating the
+    former as strings would mark every row an attack.
+
+    Args:
+        y: Validation labels of shape ``(n_samples,)``.
+
+    Returns:
+        Integer array of shape ``(n_samples,)`` with values in ``{0, 1}``.
+    """
+    arr = np.asarray(y)
+    is_string = arr.dtype.kind in {"U", "S"} or (
+        arr.dtype.kind == "O" and arr.size > 0 and isinstance(arr.reshape(-1)[0], str)
+    )
+    result: np.ndarray = (arr != NORMAL_LABEL).astype(int) if is_string else (arr != 0).astype(int)
+    return result
 
 
 class AnomalyDetector:
@@ -65,6 +106,7 @@ class AnomalyDetector:
         self._model: IsolationForest | None = None
         self._is_fitted = False
         self._threshold: float = 0.0
+        self._threshold_info: dict[str, Any] = {}
 
         logger.info(
             "anomaly_detector_initialized",
@@ -216,9 +258,10 @@ class AnomalyDetector:
         model_data = {
             "model": self._model,
             "threshold": self._threshold,
+            "threshold_info": self._threshold_info,
             "contamination": self.contamination,
             "n_estimators": self.n_estimators,
-            "version": "1.0.0",
+            "version": ARTIFACT_VERSION,
         }
 
         joblib.dump(model_data, save_path)
@@ -230,6 +273,9 @@ class AnomalyDetector:
 
         Args:
             path: Model path. Uses default if not specified.
+
+        Every field is read with ``.get()`` so that a 1.0.0 artifact — which has
+        no ``threshold_info`` — loads unchanged.
 
         Returns:
             self
@@ -246,12 +292,20 @@ class AnomalyDetector:
 
         self._model = model_data["model"]
         self._threshold = model_data.get("threshold", 0.0)
+        self._threshold_info = model_data.get("threshold_info") or {}
+        # The hyperparameters travel with the artifact: without restoring them
+        # get_params() would report the constructor's defaults for a model that
+        # was trained with entirely different ones.
+        self.contamination = model_data.get("contamination", self.contamination)
+        self.n_estimators = model_data.get("n_estimators", self.n_estimators)
         self._is_fitted = True
 
         logger.info(
             "anomaly_detector_loaded",
             path=str(load_path),
             threshold=self._threshold,
+            version=model_data.get("version", "unknown"),
+            has_operating_point=bool(self._threshold_info),
         )
 
         return self
@@ -333,3 +387,135 @@ class AnomalyDetector:
 
         self._threshold = optimal_threshold
         return float(optimal_threshold)
+
+    def optimize_threshold_fbeta(
+        self,
+        X_val: np.ndarray,
+        y_val: np.ndarray,
+        beta: float = 2.0,
+        n_candidates: int = DEFAULT_THRESHOLD_CANDIDATES,
+    ) -> float:
+        """
+        Pick the decision-function threshold maximising F-beta on ``X_val``.
+
+        The alternative to :meth:`optimize_threshold_for_recall`: instead of
+        pinning recall to a number the operator has to guess, it makes the
+        precision/recall trade-off a single explicit knob.
+
+        * ``beta > 1`` penalises false negatives — fewer missed attacks.
+        * ``beta < 1`` penalises false positives — fewer benign alarms.
+
+        Candidates are spread uniformly over the score range observed on the
+        validation set. The decision rule at threshold ``t`` is the same one
+        :meth:`predict` applies::
+
+            score(x) <  t  →  anomaly (positive class, 1)
+            score(x) >= t  →  normal  (negative class, 0)
+
+        Args:
+            X_val: Validation features of shape ``(n_samples, n_features)``.
+            y_val: Validation labels. **Two shapes are accepted**, told apart by
+                dtype: a numeric array of 0/1 (0 = normal, 1 = attack), which is
+                what the event track produces, or an array of string class names,
+                in which case anything other than ``"normal"`` counts as the
+                positive class. The flow track's detector only ever sees the
+                latter; here both occur, so both are supported.
+            beta: Recall weight relative to precision.
+            n_candidates: Thresholds scanned over the score range.
+
+        Returns:
+            The selected threshold, also stored on the instance.
+
+        Raises:
+            RuntimeError: The model has not been trained or loaded.
+        """
+        if not self.is_loaded:
+            raise RuntimeError("Model not trained. Call fit() first.")
+
+        assert self._model is not None
+
+        scores = self._model.decision_function(X_val)
+        y_binary = _binarize_labels(y_val)
+
+        candidates = np.linspace(scores.min(), scores.max(), num=n_candidates)
+        best_fbeta = -1.0
+        best_t = float(candidates[len(candidates) // 2])
+
+        for t in candidates:
+            y_pred = (scores < t).astype(int)
+            # A threshold that flags nothing has undefined precision; skipping
+            # it keeps the degenerate all-negative point out of the search.
+            if y_pred.sum() == 0:
+                continue
+            fb = fbeta_score(y_binary, y_pred, beta=beta, zero_division=0)
+            if fb > best_fbeta:
+                best_fbeta = fb
+                best_t = float(t)
+
+        self._threshold = best_t
+        y_pred_best = (scores < best_t).astype(int)
+        self._threshold_info = self._compute_operating_info(y_binary, y_pred_best, best_fbeta, beta)
+
+        info = self._threshold_info
+        logger.info(
+            "threshold_optimized_fbeta",
+            beta=beta,
+            threshold=best_t,
+            fbeta=round(best_fbeta, 6),
+            precision=info["precision"],
+            recall=info["recall"],
+            fpr=info["fpr"],
+            fnr=info["fnr"],
+        )
+        return best_t
+
+    def get_operating_point_info(self) -> dict[str, Any]:
+        """
+        Return the metrics measured at the active threshold.
+
+        Returns:
+            Dictionary with ``threshold``, ``beta``, ``f<beta>_score``,
+            ``precision``, ``recall``, ``fpr``, ``fnr`` and the raw
+            ``tp``/``fp``/``tn``/``fn`` counts. A copy, so callers cannot mutate
+            the detector's state.
+
+        Raises:
+            RuntimeError: :meth:`optimize_threshold_fbeta` has never run and no
+                saved operating point was restored, so no metrics exist. Fitting
+                alone is not enough — the percentile threshold ``fit`` computes
+                has never been measured against any label.
+        """
+        if not self._threshold_info:
+            raise RuntimeError(
+                "No operating-point info available. "
+                "Call optimize_threshold_fbeta() on a validation set first."
+            )
+        return dict(self._threshold_info)
+
+    def _compute_operating_info(
+        self,
+        y_true: np.ndarray,
+        y_pred: np.ndarray,
+        fbeta: float,
+        beta: float,
+    ) -> dict[str, Any]:
+        """Derive the full confusion-matrix diagnostics at the chosen threshold."""
+        tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+        fnr = fn / (fn + tp) if (fn + tp) > 0 else 0.0
+        beta_str = f"{beta:.1f}".rstrip("0").rstrip(".")
+        return {
+            "threshold": self._threshold,
+            "beta": beta,
+            f"f{beta_str}_score": round(fbeta, 6),
+            "precision": round(float(precision), 6),
+            "recall": round(float(recall), 6),
+            "fpr": round(float(fpr), 6),
+            "fnr": round(float(fnr), 6),
+            "tp": int(tp),
+            "fp": int(fp),
+            "tn": int(tn),
+            "fn": int(fn),
+        }

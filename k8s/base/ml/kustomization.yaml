@@ -8,4 +8,11 @@ commonLabels:
   app.kubernetes.io/managed-by: kustomize
 
 resources:
+  # Storage first: both CronJobs below are unschedulable without their claims.
+  - models-pvc.yaml
+  - cicids-data-pvc.yaml
+  # Event track (log events, 25 features) — active.
   - training-job.yaml
+  # Flow track (CICIDS2017, 78 features) — suspended until the data volume is
+  # populated. See the header of the file.
+  - flow-training-job.yaml

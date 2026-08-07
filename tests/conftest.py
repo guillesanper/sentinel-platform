@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 from jose import jwt
 
@@ -217,6 +218,114 @@ def mock_env_vars(monkeypatch):
     monkeypatch.setenv("JWT_EXPIRE_MINUTES", "60")
     monkeypatch.setenv("APP_ENV", "test")
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+
+
+# ============================================================================
+# Flow track (CICIDS2017) fixtures
+# ============================================================================
+
+# Feature columns of the mini CSVs. Three is enough to exercise loading,
+# cleaning and partitioning; the real 78-column contract is pinned separately by
+# FLOW_FEATURE_NAMES.
+CICIDS_MINI_FEATURES: tuple[str, ...] = (
+    "Flow Duration",
+    "Total Fwd Packets",
+    "Flow Bytes/s",
+)
+
+# The three characters U+00EF U+00BF U+00BD, i.e. what the en dash of the
+# "Web Attack" labels becomes when the CSV is read with latin-1. Built from code
+# points on purpose: written literally, a bad encoding round-trip on this file
+# would silently stop exercising the mojibake repair in map_label, and the
+# WebAttack class would vanish from the fixture without any test failing.
+CICIDS_MOJIBAKE_EN_DASH: str = "".join(chr(cp) for cp in (0xEF, 0xBF, 0xBD))
+
+# Filename → raw label written into the CSV. The names mimic the real
+# MachineLearningCVE distribution so that map_capture_day resolves them to a
+# real weekday.
+CICIDS_MINI_FILES: tuple[tuple[str, str], ...] = (
+    ("Tuesday-WorkingHours.pcap_ISCX.csv", "FTP-Patator"),
+    ("Wednesday-workingHours.pcap_ISCX.csv", "DoS Hulk"),
+    (
+        "Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv",
+        f"Web Attack {CICIDS_MOJIBAKE_EN_DASH} XSS",
+    ),
+    ("Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv", "DDoS"),
+    ("Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv", "PortScan"),
+)
+
+# Rows per file: a benign lead-in, the attack window, and a benign tail. This is
+# the shape measured on the real captures (decile 0 benign, deciles 1-8 attack,
+# decile 9 benign), and it is what makes a naive global positional cut produce a
+# 100% benign test set.
+CICIDS_MINI_LEAD_IN: int = 120
+CICIDS_MINI_ATTACK: int = 240
+CICIDS_MINI_TAIL: int = 120
+
+
+def _write_cicids_mini_csv(
+    path: Path,
+    raw_label: str,
+    *,
+    seed: int,
+    inject_artifacts: bool,
+) -> None:
+    """Write one synthetic CICIDS2017-shaped CSV with a temporal structure."""
+    rng = np.random.default_rng(seed)
+
+    def block(n: int, label: str, centre: float) -> dict:
+        return {
+            "Flow Duration": rng.normal(centre, 5.0, n),
+            "Total Fwd Packets": rng.integers(1, 40, n).astype(float),
+            "Flow Bytes/s": rng.normal(centre * 10, 50.0, n),
+            "Label": [label] * n,
+        }
+
+    frames = [
+        pd.DataFrame(block(CICIDS_MINI_LEAD_IN, "BENIGN", 100.0)),
+        pd.DataFrame(block(CICIDS_MINI_ATTACK, raw_label, 500.0)),
+        pd.DataFrame(block(CICIDS_MINI_TAIL, "BENIGN", 100.0)),
+    ]
+    df = pd.concat(frames, ignore_index=True)
+
+    if inject_artifacts:
+        # Real CSVs carry these three; the loader must survive all of them.
+        df.loc[5, "Flow Bytes/s"] = np.inf
+        df.loc[7, "Flow Duration"] = np.nan
+        df.loc[9] = df.loc[8]  # exact duplicate row
+        # An unmapped label: its rows must be discarded, not crash the load.
+        df.loc[11, "Label"] = "Some Future Attack"
+
+    # Leading whitespace in the header is present in the real files.
+    df.columns = [f" {c}" for c in df.columns]
+    df.to_csv(path, index=False, encoding="latin-1")
+
+
+@pytest.fixture
+def cicids_mini_csv(tmp_path: Path) -> Path:
+    """
+    Generate a miniature CICIDS2017 dataset and return its directory.
+
+    The CSVs are written at test time rather than committed: ``.gitignore`` has
+    a global ``*.csv`` rule, so a committed fixture would silently disappear on
+    a fresh clone.
+
+    Each file holds one attack class surrounded by benign traffic, mirroring the
+    real capture layout, so the temporal split has a meaningful notion of
+    "earlier" inside every ``(capture_day, class)`` block.
+    """
+    data_dir = tmp_path / "cicids-mini"
+    data_dir.mkdir()
+
+    for seed, (filename, raw_label) in enumerate(CICIDS_MINI_FILES):
+        _write_cicids_mini_csv(
+            data_dir / filename,
+            raw_label,
+            seed=1000 + seed,
+            inject_artifacts=(seed == 0),
+        )
+
+    return data_dir
 
 
 # ============================================================================

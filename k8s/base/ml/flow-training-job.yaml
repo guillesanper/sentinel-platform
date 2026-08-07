@@ -1,0 +1,168 @@
+---
+# ============================================================================
+# Flow track — weekly retrain of the CICIDS2017 cascade
+# ============================================================================
+# Trains `CascadeXGBPipeline` (IsolationForest → XGBoost) and writes it to
+# `/app/models/flow/cascade_xgb`, which is the exact directory
+# `CascadeInferenceService.load()` reads by default.
+#
+# SHIPS SUSPENDED. The job reads the eight CICIDS2017 CSVs from the
+# `sentinel-cicids-data` claim, and that claim starts empty — the 844 MB are
+# excluded from the image by `.dockerignore` on purpose. Populate the volume
+# first (the recipe is in `cicids-data-pvc.yaml`), then:
+#
+#   kubectl -n ml patch cronjob sentinel-flow-training -p '{"spec":{"suspend":false}}'
+#
+# Scheduled three hours after `sentinel-training` because both mount the same
+# ReadWriteOnce `sentinel-models` claim; overlapping runs on different nodes
+# would leave the second pod Pending.
+#
+# IMAGE CONSTRAINTS — these are why the flags below are not negotiable:
+#   * `--pipeline xgb`. `.dockerignore` excludes `cascade_mlp.py` and
+#     `neural_network.py`; `--pipeline mlp` or `both` would fail on import.
+#     `train_cicids.py` imports `cascade_mlp` lazily inside `_make_pipeline`,
+#     so `xgb` never touches the missing module.
+#   * `--no-plots --no-eda`. matplotlib and seaborn live in
+#     `requirements-dev.txt` and the image installs only `requirements.txt`;
+#     `ml/evaluation/plots.py` is excluded from the build context as well.
+#     Both are already the CLI defaults — they are stated here so a future
+#     reader sees the constraint rather than rediscovering it from a traceback.
+#   * `--split temporal`. The default, and the methodological point of the
+#     track: cutting each (capture day, class) block chronologically instead of
+#     splitting rows at random. It costs a lot of headline accuracy — F1-macro
+#     ~0.28 against ~0.92 for the random split on the same run — because the
+#     random number is inflated by near-duplicate flows from the same attack
+#     burst landing in train and test at once. The lower number is the honest
+#     one. Do not "fix" this by switching to `random`.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: sentinel-flow-training
+  namespace: ml
+  labels:
+    app.kubernetes.io/name: sentinel-flow-training
+    app.kubernetes.io/component: ml
+    app.kubernetes.io/part-of: sentinel
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  suspend: true  # see the header: the data volume must be populated first
+  schedule: "0 5 * * 0"  # Weekly on Sunday at 5 AM, after sentinel-training
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 10800  # 3 hours max
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: sentinel-flow-training
+            app.kubernetes.io/component: ml
+            app.kubernetes.io/part-of: sentinel
+        spec:
+          serviceAccountName: sentinel-ml
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: flow-training
+              image: sentinel-api:latest
+              imagePullPolicy: IfNotPresent
+              command:
+                - python
+                - -m
+                - ml.training.train_cicids
+              args:
+                - --data-dir
+                - /data/cicids
+                # FlowConfig.output_path. The cascade lands in
+                # `<output-dir>/cascade_xgb`, which is what
+                # `CascadeInferenceService` loads.
+                - --output-dir
+                - /app/models/flow
+                # Stratified sample. The full capture is ~2.8M flows; 200k
+                # keeps training to ~15s and every class represented.
+                # It does NOT govern the memory ceiling: `load_cicids2017`
+                # reads and concatenates all eight CSVs before sampling, so the
+                # peak is paid regardless of this number. See `resources`.
+                - --sample-size
+                - "200000"
+                - --pipeline
+                - xgb
+                - --split
+                - temporal
+                # Recall-weighted Stage 1 threshold, same rationale as the
+                # event track.
+                - --beta
+                - "2.0"
+                # RandomizedSearchCV over 20 candidates x 3 folds on 140k rows
+                # does not fit the deadline above. Switch to `--tune` and raise
+                # activeDeadlineSeconds together, never separately.
+                - --skip-tuning
+                - --no-plots
+                - --no-eda
+                # No-op flag on this CLI (MLflow is out of scope for the flow
+                # track), passed explicitly so the summary records
+                # `mlflow.requested: false` rather than leaving it to a default
+                # that could change.
+                - --no-mlflow
+              # MEASURED, not estimated. A full run of the args above peaks at
+              # 7.97 GiB resident: `load_cicids2017` concatenates all eight
+              # CSVs into one frame before `stratified_sample` cuts it down, so
+              # the 844 MB on disk become ~8 GiB of float64 columns plus the
+              # copies `pd.concat` and `clean_dataset` make along the way. An
+              # 8Gi limit — the obvious guess — is an OOMKill.
+              #
+              # The whole run takes ~90s wall clock, ~15s of it training, so
+              # the deadline above is generous on purpose: it is sized for the
+              # I/O of reading the volume, not for the compute.
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 8Gi
+                limits:
+                  cpu: "4"
+                  memory: 12Gi
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              env:
+                - name: ENVIRONMENT
+                  valueFrom:
+                    configMapKeyRef:
+                      name: sentinel-ml-config
+                      key: ENVIRONMENT
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+                - name: models
+                  mountPath: /app/models
+                - name: cicids-data
+                  mountPath: /data/cicids
+                  readOnly: true
+                # /home/sentinel, not /home/appuser — see training-job.yaml.
+                - name: cache
+                  mountPath: /home/sentinel/.cache
+          volumes:
+            - name: tmp
+              emptyDir: {}
+            - name: cache
+              emptyDir: {}
+            - name: models
+              persistentVolumeClaim:
+                claimName: sentinel-models
+            - name: cicids-data
+              persistentVolumeClaim:
+                claimName: sentinel-cicids-data
+                readOnly: true
