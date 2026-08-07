@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ml.models.anomaly_detector import AnomalyDetector
+from ml.models.anomaly_detector import ARTIFACT_VERSION, AnomalyDetector
 from ml.models.classifier import ATTACK_TYPES, AttackClassifier
 from ml.models.fusion import FusionLayer
 
@@ -220,6 +220,361 @@ class TestAnomalyDetectorGetParams:
         assert "contamination" in params
         assert "n_estimators" in params
         assert "is_fitted" in params
+
+
+# ============================================================================
+# AnomalyDetector — F-beta threshold (E11)
+# ============================================================================
+
+# Class separation used by `overlapping_events`. Deliberately small: with
+# well-separated classes every beta finds the same near-perfect threshold and
+# the F-beta property below holds trivially, proving nothing.
+_ANOMALY_SEPARATION = 0.5
+
+_N_VAL_NORMAL = 300
+_N_VAL_ATTACK = 100
+
+
+@pytest.fixture
+def overlapping_events() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    A benign-only training matrix plus a validation set whose classes overlap.
+
+    Returns ``(X_train, X_val, y_val_binary, y_val_labels)`` — the same
+    validation rows expressed both ways, so the two accepted label shapes can be
+    compared directly.
+    """
+    rng = np.random.default_rng(7)
+
+    X_train = rng.normal(0.0, 1.0, size=(400, 17)).astype(np.float32)
+    X_val = np.vstack(
+        [
+            rng.normal(0.0, 1.0, size=(_N_VAL_NORMAL, 17)),
+            rng.normal(_ANOMALY_SEPARATION, 1.0, size=(_N_VAL_ATTACK, 17)),
+        ]
+    ).astype(np.float32)
+
+    y_binary = np.concatenate(
+        [np.zeros(_N_VAL_NORMAL, dtype=int), np.ones(_N_VAL_ATTACK, dtype=int)]
+    )
+    y_labels = np.array(
+        ["normal"] * _N_VAL_NORMAL + ["brute_force"] * _N_VAL_ATTACK,
+        dtype=object,
+    )
+    return X_train, X_val, y_binary, y_labels
+
+
+def _fitted(X_train: np.ndarray) -> AnomalyDetector:
+    """A detector trained on `X_train` with a fast, deterministic forest."""
+    return AnomalyDetector(contamination=0.1, n_estimators=50, random_state=42).fit(X_train)
+
+
+class TestOptimizeThresholdFbeta:
+    """The property that gives ``beta`` its meaning."""
+
+    def test_accepts_binary_int_labels(self, overlapping_events) -> None:
+        """The event track's native shape: 0 = normal, 1 = attack."""
+        X_train, X_val, y_binary, _ = overlapping_events
+        detector = _fitted(X_train)
+
+        threshold = detector.optimize_threshold_fbeta(X_val, y_binary, beta=2.0)
+
+        assert isinstance(threshold, float)
+        assert detector._threshold == threshold
+        assert detector.get_operating_point_info()["threshold"] == threshold
+
+    def test_accepts_string_labels(self, overlapping_events) -> None:
+        """Canonical class names: anything but "normal" is the positive class."""
+        X_train, X_val, _, y_labels = overlapping_events
+        detector = _fitted(X_train)
+
+        detector.optimize_threshold_fbeta(X_val, y_labels, beta=2.0)
+
+        info = detector.get_operating_point_info()
+        assert info["tp"] + info["fn"] == _N_VAL_ATTACK
+        assert info["tn"] + info["fp"] == _N_VAL_NORMAL
+
+    def test_both_label_shapes_agree(self, overlapping_events) -> None:
+        """
+        The two shapes describe the same validation set, so they must select the
+        same threshold. If the dtype sniffing ever mistook one for the other the
+        run would still produce a threshold — just one fitted against labels that
+        are all 1, which is exactly the kind of silent wrongness worth pinning.
+        """
+        X_train, X_val, y_binary, y_labels = overlapping_events
+
+        from_ints = _fitted(X_train)
+        from_ints.optimize_threshold_fbeta(X_val, y_binary, beta=2.0)
+
+        from_strings = _fitted(X_train)
+        from_strings.optimize_threshold_fbeta(X_val, y_labels, beta=2.0)
+
+        assert from_strings.get_operating_point_info() == from_ints.get_operating_point_info()
+
+    def test_recall_favouring_beta_never_loses_recall(self, overlapping_events) -> None:
+        """
+        beta=2.0 weighs recall four times as heavily as beta=0.5 does, so the
+        threshold it selects can never be the stingier of the two. This is the
+        fundamental guarantee of the F-beta family, and the only thing standing
+        between an operator asking for high recall and silently not getting it.
+        """
+        X_train, X_val, y_binary, _ = overlapping_events
+
+        recall_hungry = _fitted(X_train)
+        recall_hungry.optimize_threshold_fbeta(X_val, y_binary, beta=2.0)
+
+        precision_hungry = _fitted(X_train)
+        precision_hungry.optimize_threshold_fbeta(X_val, y_binary, beta=0.5)
+
+        op_recall = recall_hungry.get_operating_point_info()
+        op_precision = precision_hungry.get_operating_point_info()
+
+        assert op_recall["recall"] >= op_precision["recall"]
+        # Without this the assertion above could pass on a degenerate dataset
+        # where both betas reach recall 1.0 and nothing was actually compared.
+        assert op_precision["recall"] < 1.0
+
+    def test_precision_favouring_beta_never_loses_precision(self, overlapping_events) -> None:
+        """The dual: beta<1 must not end up less precise than beta>1."""
+        X_train, X_val, y_binary, _ = overlapping_events
+
+        recall_hungry = _fitted(X_train)
+        recall_hungry.optimize_threshold_fbeta(X_val, y_binary, beta=2.0)
+
+        precision_hungry = _fitted(X_train)
+        precision_hungry.optimize_threshold_fbeta(X_val, y_binary, beta=0.5)
+
+        assert (
+            precision_hungry.get_operating_point_info()["precision"]
+            >= recall_hungry.get_operating_point_info()["precision"]
+        )
+
+    def test_without_fit_raises(self, overlapping_events) -> None:
+        _, X_val, y_binary, _ = overlapping_events
+        with pytest.raises(RuntimeError, match="not trained"):
+            AnomalyDetector().optimize_threshold_fbeta(X_val, y_binary)
+
+    def test_n_candidates_is_honoured(self, overlapping_events) -> None:
+        """A coarser scan must still land on a valid threshold in range."""
+        X_train, X_val, y_binary, _ = overlapping_events
+        detector = _fitted(X_train)
+
+        threshold = detector.optimize_threshold_fbeta(X_val, y_binary, beta=1.0, n_candidates=5)
+
+        assert isinstance(threshold, float)
+        assert detector.get_operating_point_info()["threshold"] == threshold
+
+
+class TestAnomalyDetectorOperatingPoint:
+    """What the detector reports about the threshold it is using."""
+
+    def test_before_optimizing_raises(self, overlapping_events) -> None:
+        """
+        Fitting alone is not enough: the percentile threshold `fit` computes has
+        never been measured against any label, so there is no operating point to
+        report and returning zeros would be a lie.
+        """
+        X_train, _, _, _ = overlapping_events
+
+        with pytest.raises(RuntimeError, match="optimize_threshold_fbeta"):
+            _fitted(X_train).get_operating_point_info()
+
+    def test_reports_the_full_confusion_matrix(self, overlapping_events) -> None:
+        X_train, X_val, y_binary, _ = overlapping_events
+        detector = _fitted(X_train)
+        detector.optimize_threshold_fbeta(X_val, y_binary, beta=2.0)
+
+        info = detector.get_operating_point_info()
+
+        assert set(info) >= {
+            "threshold",
+            "beta",
+            "f2_score",
+            "precision",
+            "recall",
+            "fpr",
+            "fnr",
+            "tp",
+            "fp",
+            "tn",
+            "fn",
+        }
+        assert info["tp"] + info["fp"] + info["tn"] + info["fn"] == len(y_binary)
+        assert info["beta"] == 2.0
+
+    def test_beta_key_is_named_after_beta(self, overlapping_events) -> None:
+        X_train, X_val, y_binary, _ = overlapping_events
+        detector = _fitted(X_train)
+        detector.optimize_threshold_fbeta(X_val, y_binary, beta=0.5)
+
+        assert "f0.5_score" in detector.get_operating_point_info()
+
+    def test_returned_dict_is_a_copy(self, overlapping_events) -> None:
+        X_train, X_val, y_binary, _ = overlapping_events
+        detector = _fitted(X_train)
+        detector.optimize_threshold_fbeta(X_val, y_binary, beta=1.0)
+
+        detector.get_operating_point_info()["recall"] = -1.0
+
+        assert detector.get_operating_point_info()["recall"] != -1.0
+
+    def test_roundtrip_preserves_the_operating_point(
+        self, overlapping_events, tmp_path: Path
+    ) -> None:
+        """Serving must be able to explain its decisions without a val set."""
+        X_train, X_val, y_binary, _ = overlapping_events
+        detector = _fitted(X_train)
+        detector.optimize_threshold_fbeta(X_val, y_binary, beta=2.0)
+
+        model_path = tmp_path / "detector.joblib"
+        detector.save(model_path)
+
+        restored = AnomalyDetector().load(model_path)
+
+        assert restored.get_operating_point_info() == detector.get_operating_point_info()
+
+
+class TestOptimizeThresholdCoexistence:
+    """`optimize_threshold_for_recall` keeps working exactly as it did."""
+
+    def test_recall_strategy_still_meets_its_target(self, overlapping_events) -> None:
+        """
+        The threshold picked from the PR curve must translate into roughly the
+        requested recall when `predict` actually applies it.
+
+        "Roughly" and not "exactly": the curve's rule is ``raw_score <=
+        threshold`` while `predict` uses a strict ``<``, so the sample sitting
+        exactly on the boundary changes sides. That is a pre-existing rounding
+        seam, not the label misalignment E12 fixes — under that bug the number
+        below lands near the base rate instead of near the target.
+        """
+        X_train, X_val, y_binary, _ = overlapping_events
+        detector = _fitted(X_train)
+
+        detector.optimize_threshold_for_recall(X_val, y_binary, target_recall=0.8)
+
+        flagged = np.array(
+            [1 if detector.predict(row)["is_anomaly"] else 0 for row in X_val],
+        )
+        attacks = y_binary == 1
+        assert flagged[attacks].mean() >= 0.78
+
+    def test_recall_strategy_leaves_no_operating_point(self, overlapping_events) -> None:
+        """
+        It never measured one. Reporting the F-beta operating point of a
+        threshold picked by a different rule would be a fabricated number.
+        """
+        X_train, X_val, y_binary, _ = overlapping_events
+        detector = _fitted(X_train)
+
+        detector.optimize_threshold_for_recall(X_val, y_binary, target_recall=0.8)
+
+        with pytest.raises(RuntimeError):
+            detector.get_operating_point_info()
+
+    def test_recall_strategy_without_fit_raises(self, overlapping_events) -> None:
+        _, X_val, y_binary, _ = overlapping_events
+        with pytest.raises(RuntimeError, match="not trained"):
+            AnomalyDetector().optimize_threshold_for_recall(X_val, y_binary)
+
+    def test_unreachable_target_falls_back_to_max_recall(self, overlapping_events) -> None:
+        """
+        A target above 1.0 cannot be met by any threshold. The detector must
+        still return a usable one — the most permissive it found — rather than
+        crash a training run at the last step.
+        """
+        X_train, X_val, y_binary, _ = overlapping_events
+        detector = _fitted(X_train)
+
+        threshold = detector.optimize_threshold_for_recall(X_val, y_binary, target_recall=1.5)
+
+        assert isinstance(threshold, float)
+        assert detector._threshold == threshold
+
+    def test_the_two_strategies_pick_different_thresholds(self, overlapping_events) -> None:
+        """Otherwise `--threshold-strategy` would be a no-op knob."""
+        X_train, X_val, y_binary, _ = overlapping_events
+
+        by_recall = _fitted(X_train)
+        by_recall.optimize_threshold_for_recall(X_val, y_binary, target_recall=0.8)
+
+        by_fbeta = _fitted(X_train)
+        by_fbeta.optimize_threshold_fbeta(X_val, y_binary, beta=0.5)
+
+        assert by_recall._threshold != by_fbeta._threshold
+
+
+class TestAnomalyDetectorArtifactCompatibility:
+    """`load()` and the hyperparameters the artifact carries."""
+
+    def test_get_params_after_load_reflects_the_saved_model(
+        self, overlapping_events, tmp_path: Path
+    ) -> None:
+        """
+        The bug this pins: `load()` used to restore only the forest and the
+        threshold, so `get_params()` reported whatever the *constructor* was
+        given — the defaults, for a model trained with something else entirely.
+        Every consumer of that dict was being told a number that had nothing to
+        do with the model in memory.
+        """
+        X_train, _, _, _ = overlapping_events
+        trained = AnomalyDetector(contamination=0.25, n_estimators=37, random_state=42)
+        trained.fit(X_train)
+
+        model_path = tmp_path / "detector.joblib"
+        trained.save(model_path)
+
+        restored = AnomalyDetector(contamination=0.1, n_estimators=100).load(model_path)
+
+        params = restored.get_params()
+        assert params["contamination"] == 0.25
+        assert params["n_estimators"] == 37
+
+    def test_load_accepts_a_v1_0_0_artifact(self, overlapping_events, tmp_path: Path) -> None:
+        """
+        1.0.0 files are already on disk in deployed clusters and have no
+        `threshold_info`. They must keep loading and predicting.
+        """
+        import joblib
+
+        X_train, _, _, _ = overlapping_events
+        trained = _fitted(X_train)
+
+        legacy_path = tmp_path / "legacy.joblib"
+        joblib.dump(
+            {
+                "model": trained._model,
+                "threshold": trained._threshold,
+                "contamination": trained.contamination,
+                "n_estimators": trained.n_estimators,
+                "version": "1.0.0",
+            },
+            legacy_path,
+        )
+
+        restored = AnomalyDetector().load(legacy_path)
+
+        assert restored.is_loaded
+        assert restored._threshold == trained._threshold
+        assert restored.predict(X_train[0])["score"] == trained.predict(X_train[0])["score"]
+        with pytest.raises(RuntimeError):
+            restored.get_operating_point_info()
+
+    def test_save_writes_the_current_artifact_version(
+        self, overlapping_events, tmp_path: Path
+    ) -> None:
+        import joblib
+
+        X_train, X_val, y_binary, _ = overlapping_events
+        detector = _fitted(X_train)
+        detector.optimize_threshold_fbeta(X_val, y_binary, beta=2.0)
+
+        model_path = tmp_path / "detector.joblib"
+        detector.save(model_path)
+
+        payload = joblib.load(model_path)
+        assert payload["version"] == ARTIFACT_VERSION
+        assert payload["threshold_info"]["beta"] == 2.0
 
 
 # ============================================================================

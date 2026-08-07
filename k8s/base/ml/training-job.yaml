@@ -1,4 +1,31 @@
 ---
+# ============================================================================
+# Event track — weekly retrain
+# ============================================================================
+# Trains the log-event cascade (`AnomalyDetector` + `AttackClassifier`) and
+# writes the artifacts to the `sentinel-models` PVC.
+#
+# `command`/`args` are the real click interface of `ml.training.train`, not a
+# paraphrase of it. The previous version invoked `python -m
+# sentinel.training.cli train --config /config/training-config.yaml`: a module
+# that has never existed in this repository, pointed at a config file that no
+# code path reads. Nothing caught it because nothing in CI runs the manifest's
+# command. If you change these flags, run them: `python -m ml.training.train
+# --help`.
+#
+# NOTE ON SERVING: this job produces artifacts, it does not publish them. The
+# API Deployment (`k8s/base/platform/deployment.yaml`) mounts no model volume,
+# so a cluster API pod starts with untrained models on the event track and
+# answers 503 on the flow endpoints. Making these artifacts servable requires a
+# transfer step, because `sentinel-models` lives in namespace `ml` and the API
+# lives in namespace `platform` — PVCs do not cross namespaces. The options, in
+# order of intrusiveness: (a) an object-store round trip (upload here, download
+# in an init container — `MODELS_BUCKET` exists for exactly this and is not yet
+# wired up on either side), (b) a ReadWriteMany volume backed by a filesystem
+# CSI driver, exposed as a second PVC bound to the same PV, or (c) baking the
+# artifacts into the image at build time. This is a precondition for the flow
+# endpoints in cluster, not a regression: the event track has always been in
+# this state.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -41,11 +68,36 @@ spec:
               command:
                 - python
                 - -m
-                - sentinel.training.cli
+                - ml.training.train
               args:
-                - train
-                - --config
-                - /config/training-config.yaml
+                # Synthetic generator. `--data-path` / `--csv-path` are the
+                # alternatives, and both need a corpus that is not in the
+                # cluster today; 60k events is the point where the campaign
+                # windowing (`--use-window-features`, the default) still leaves
+                # a validation split large enough for the threshold search to
+                # mean anything.
+                - --n-samples
+                - "60000"
+                - --attack-ratio
+                - "0.2"
+                # F-beta with beta=2 weights recall over precision: a missed
+                # intrusion costs more than an analyst dismissing a false
+                # positive. Writes the operating point into
+                # `training_summary.json`.
+                - --threshold-strategy
+                - fbeta
+                - --beta
+                - "2.0"
+                # The PVC, mounted below. Matches the image's MODELS_PATH and
+                # the relative default the model classes resolve from /app.
+                - --output-dir
+                - /app/models
+                # MLFLOW_TRACKING_URI below points at a Service that this
+                # repository does not deploy, and `log_to_mlflow` has no
+                # fallback — enabling tracking here would fail the job every
+                # Sunday after the models were already saved. Drop this flag
+                # once an MLflow server exists in the `ml` namespace.
+                - --no-mlflow
               resources:
                 requests:
                   cpu: "1"
@@ -67,37 +119,41 @@ spec:
                     configMapKeyRef:
                       name: sentinel-ml-config
                       key: ENVIRONMENT
-                - name: MODELS_BUCKET
-                  valueFrom:
-                    configMapKeyRef:
-                      name: sentinel-ml-config
-                      key: MODELS_BUCKET
+                # Read by the mlflow client library itself, not by our code, so
+                # it is kept even though `--no-mlflow` makes it inert today: it
+                # is what makes removing that flag a one-line change.
                 - name: MLFLOW_TRACKING_URI
                   valueFrom:
                     configMapKeyRef:
                       name: sentinel-ml-config
                       key: MLFLOW_TRACKING_URI
-                - name: DATA_PATH
-                  valueFrom:
-                    configMapKeyRef:
-                      name: sentinel-ml-config
-                      key: DATA_PATH
+                # MODELS_BUCKET and DATA_PATH used to be injected here too.
+                # Neither is read by anything: `ml.training.train` is entirely
+                # click-driven and has no object-store code path. DATA_PATH was
+                # the more misleading of the two — a `gs://` URL suggesting the
+                # job trains on captured data when it trains on the synthetic
+                # generator. They stay in the ConfigMap below, ready for the
+                # day the code reads them.
               volumeMounts:
                 - name: tmp
                   mountPath: /tmp
-                - name: config
-                  mountPath: /config
-                  readOnly: true
+                - name: models
+                  mountPath: /app/models
+                # $HOME in this image is /home/sentinel: the Dockerfile creates
+                # the `sentinel` user with --create-home. The mount used to
+                # point at /home/appuser/.cache, a path no process ever writes
+                # to, which left the real cache directory on the read-only
+                # root filesystem.
                 - name: cache
-                  mountPath: /home/appuser/.cache
+                  mountPath: /home/sentinel/.cache
           volumes:
             - name: tmp
               emptyDir: {}
             - name: cache
               emptyDir: {}
-            - name: config
-              configMap:
-                name: sentinel-training-config
+            - name: models
+              persistentVolumeClaim:
+                claimName: sentinel-models
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -114,44 +170,11 @@ data:
   MODELS_BUCKET: "sentinel-models-${ENVIRONMENT}-${PROJECT_ID}"
   MLFLOW_TRACKING_URI: "http://mlflow.ml.svc.cluster.local:5000"
   DATA_PATH: "gs://sentinel-data-${ENVIRONMENT}-${PROJECT_ID}/training/"
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: sentinel-training-config
-  namespace: ml
-  labels:
-    app.kubernetes.io/name: sentinel-training
-    app.kubernetes.io/component: ml
-    app.kubernetes.io/part-of: sentinel
-    app.kubernetes.io/managed-by: kustomize
-data:
-  training-config.yaml: |
-    # Sentinel ML Training Configuration
-    training:
-      batch_size: 1024
-      epochs: 100
-      early_stopping_patience: 10
-      validation_split: 0.2
-
-    models:
-      anomaly_detector:
-        type: isolation_forest
-        contamination: 0.1
-        n_estimators: 100
-        max_samples: "auto"
-
-      attack_classifier:
-        type: xgboost
-        n_estimators: 100
-        max_depth: 6
-        learning_rate: 0.1
-        objective: "multi:softprob"
-
-    features:
-      n_features: 17
-      normalize: true
-
-    output:
-      model_path: "models/"
-      metrics_path: "metrics/"
+# The `sentinel-training-config` ConfigMap that used to follow here is gone,
+# along with the /config mount that carried it. It described a training run
+# nobody performs: `batch_size`, `epochs` and `early_stopping_patience` for
+# models that are an IsolationForest and an XGBoost classifier, and
+# `features.n_features: 17` when the event track has used 25 features since
+# window features became the default. `ml/training/train.py` is 100% click and
+# never opened the file, so the wrong numbers were invisible. Every value that
+# actually steers a run is now an explicit flag in `args` above.

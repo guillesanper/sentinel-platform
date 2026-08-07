@@ -14,7 +14,7 @@ Generates realistic security events for each attack type:
 import random
 import string
 from datetime import datetime, timedelta
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Final
 
 import structlog
 
@@ -23,6 +23,28 @@ logger = structlog.get_logger()
 # ============================================================================
 # Constants
 # ============================================================================
+
+# Anchor for every generated timestamp.
+#
+# This used to be `datetime.utcnow()`, which quietly made the generator
+# irreproducible even when seeded. Timestamps are not decoration here:
+# `ml/features/pipeline.py` turns them into five features — hour_of_day,
+# day_of_week, is_weekend, is_night, is_business_hours — so the training matrix
+# was a function of what time of day the process happened to run. Measured on
+# `ml.training.train --n-samples 1200 --seed 42`, anomaly recall ranged from
+# 0.708 to 0.875 across the hours of a single day with everything else fixed,
+# which is what made `test_recall_strategy_reaches_its_target_on_held_out_data`
+# fail roughly one run in ten.
+#
+# A Wednesday at midday, so that the 24-hour window `_random_timestamp` samples
+# backwards from stays inside the working week and the business-hours and
+# night-hours branches both remain reachable. Events still spread across that
+# window under the seeded RNG, so the feature distribution is as rich as
+# before — it is now the same one every run.
+#
+# Callers that genuinely want wall-clock output pass `base=datetime.utcnow()`
+# explicitly.
+SYNTHETIC_EPOCH: Final[datetime] = datetime(2026, 6, 10, 12, 0, 0)
 
 # Common usernames for generation
 NORMAL_USERS = [
@@ -195,7 +217,7 @@ def _random_timestamp(
 ) -> str:
     """Generate a random ISO timestamp."""
     if base is None:
-        base = datetime.utcnow()
+        base = SYNTHETIC_EPOCH
 
     delta = timedelta(
         hours=random.randint(0, hours_delta),
@@ -862,7 +884,7 @@ class SyntheticEventGenerator:
         if target_user is None:
             target_user = random.choice(NORMAL_USERS[:10])
 
-        base_time = datetime.utcnow()
+        base_time = SYNTHETIC_EPOCH
         events = []
 
         for i in range(n_events):

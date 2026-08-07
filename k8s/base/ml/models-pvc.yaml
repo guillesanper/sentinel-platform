@@ -1,0 +1,42 @@
+---
+# ============================================================================
+# Model artifact storage for the training CronJobs
+# ============================================================================
+# Both training containers run with `readOnlyRootFilesystem: true`. Without a
+# persistent volume the only writable paths are `emptyDir` mounts, which the
+# kubelet deletes when the pod terminates — so every weekly run trained a model
+# and then threw it away.
+#
+# Mounted at `/app/models`, which is the image's `MODELS_PATH` and the working
+# directory the model classes resolve their relative default paths against
+# (`models/anomaly_detector.joblib`, `models/flow/cascade_xgb`).
+#
+# ReadWriteOnce, not ReadWriteMany: no consumer needs concurrent access. The
+# two CronJobs are scheduled three hours apart and both use
+# `concurrencyPolicy: Forbid`, so at most one pod ever has it mounted. Note
+# that RWO on a block-backed CSI driver (GKE pd.csi, EBS) binds the volume to a
+# single node — if the two jobs ever do overlap and land on different nodes,
+# the second pod stays Pending rather than corrupting anything.
+#
+# The API Deployment does NOT and cannot mount this claim: PersistentVolume-
+# Claims are namespaced, this one lives in `ml` and the API lives in
+# `platform`. Serving these artifacts in cluster needs a separate transfer
+# step — see the note in `training-job.yaml`.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sentinel-models
+  namespace: ml
+  labels:
+    app.kubernetes.io/name: sentinel-models
+    app.kubernetes.io/component: ml
+    app.kubernetes.io/part-of: sentinel
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  # storageClassName is deliberately unset so the cluster default applies.
+  # Pin it in an overlay when the environment needs a specific class.

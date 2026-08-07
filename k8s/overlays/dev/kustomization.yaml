@@ -1,7 +1,23 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-namespace: platform
+# There is deliberately no top-level `namespace:` here.
+#
+# This overlay used to set `namespace: platform`, which made it fail to render
+# at all: kustomize's namespace transformer rewrites Namespace objects too, so
+# the three namespaces from `base/namespaces/` all became `platform` and
+# collided ("namespace transformation produces ID conflict").
+#
+# Deleting the line rather than working around the collision is the correct fix
+# twice over. The base is a two-namespace deployment — the API in `platform`,
+# the training CronJobs, PVCs, Roles and NetworkPolicies in `ml` — and every
+# single base resource already declares its own `metadata.namespace`. Forcing
+# `platform` on all of them would have moved the entire ML side out of its
+# namespace, away from the `sentinel-ml` ServiceAccount and the NetworkPolicies
+# written for it. The render error was hiding a worse bug than itself.
+#
+# The patches below still carry `namespace: platform` in their own metadata,
+# which is what makes them match their targets.
 
 resources:
   - ../../base

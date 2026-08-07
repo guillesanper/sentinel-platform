@@ -91,8 +91,13 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            # $HOME in this image is /home/sentinel: `api/Dockerfile` creates
+            # the user with `useradd --create-home sentinel`. This mount used
+            # to point at /home/appuser/.cache, a path no process ever writes
+            # to, which left the real cache directory sitting on the read-only
+            # root filesystem enforced above.
             - name: cache
-              mountPath: /home/appuser/.cache
+              mountPath: /home/sentinel/.cache
       volumes:
         - name: tmp
           emptyDir: {}

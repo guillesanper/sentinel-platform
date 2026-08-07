@@ -60,6 +60,9 @@ exclude = [
     "*.egg-info",
     "build",
     "dist",
+    # One-shot academic script archived verbatim from the CICIDS2017 TFA.
+    # Kept unmodified as a historical artifact; not part of the codebase.
+    "docs/ml/presentacion/generar_presentacion.py",
 ]
 
 [tool.ruff.lint]
@@ -91,6 +94,20 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ARG", "PLR2004", "S101"]
 "**/__init__.py" = ["F401"]
+# Frozen academic artifact ported verbatim from the CICIDS2017 TFA. Its
+# training loop is one long function by design: warmup, balanced batching,
+# focal weighting, early stopping and LR scheduling are all interleaved.
+# Splitting it up would be a rewrite of code whose value is that it is
+# unchanged and its measured numbers still hold.
+"ml/flow/models/neural_network.py" = ["PLR0912", "PLR0915", "C901"]
+# Figure generation: long dispatch chains with no branching logic worth
+# extracting.
+"ml/evaluation/plots.py" = ["PLR0912", "PLR0915", "C901"]
+# Training entry points: `main` is a linear script — load, split, train,
+# evaluate, save, report — and every branch is an explicit CLI option. Cutting
+# it into pieces would hide the order the run happens in, which is the one
+# thing a reader of a training script needs.
+"ml/training/train_cicids.py" = ["PLR0912", "PLR0915", "C901"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["api", "ml", "data"]
@@ -125,6 +142,8 @@ pretty = true
 module = [
     "sklearn.*",
     "xgboost.*",
+    "matplotlib.*",
+    "seaborn.*",
     "mlflow.*",
     "prometheus_client.*",
     "structlog.*",
@@ -173,6 +192,17 @@ omit = [
     "*/__init__.py",
     "*/conftest.py",
     "ml/training/train.py",  # Training code tested via integration/manual validation
+    # Same rationale for the flow track's CLI: exercised end to end by a @slow
+    # CliRunner smoke plus the CLI→serving roundtrip, not by line coverage.
+    "ml/training/train_cicids.py",
+    # Figure generation: no logic worth asserting on, and importing it would
+    # drag matplotlib/seaborn into every coverage run. Validated by eye.
+    "ml/evaluation/plots.py",
+    # Experimental branch of the flow track, kept for its academic value and
+    # excluded from serving: F1-macro 0.7508 against 0.9516 for the XGBoost
+    # cascade. Covered by @slow smoke tests, not by line coverage.
+    "ml/flow/models/neural_network.py",
+    "ml/flow/pipelines/cascade_mlp.py",
 ]
 
 [tool.coverage.report]
