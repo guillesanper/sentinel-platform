@@ -26,10 +26,22 @@ from ml.flow.labels import (
 
 
 class TestTaxonomy:
-    """Structural invariants of the 7-class taxonomy."""
+    """Structural invariants of the 8-class taxonomy."""
 
-    def test_class_order_has_seven_classes(self):
-        assert len(CLASS_ORDER) == 7
+    def test_class_order_has_eight_classes(self):
+        assert len(CLASS_ORDER) == 8
+
+    def test_infiltration_is_its_own_class(self):
+        """
+        It used to be folded into ``Scan``, which merged 36 flows of a
+        host-compromise scenario into 158.930 of port sweeping *and* smuggled
+        them past ``filter_minority_classes`` — the filter runs after the
+        collapse, so ``min_class_samples`` never saw them. Separate, the filter
+        drops the class on its own, which is what it is for.
+        """
+        assert "Infiltration" in CLASS_ORDER
+        assert ATTACK_GROUPS["Infiltration"] == "Infiltration"
+        assert ATTACK_GROUPS["PortScan"] == "Scan"
 
     def test_class_order_has_no_duplicates(self):
         assert len(set(CLASS_ORDER)) == len(CLASS_ORDER)
@@ -72,7 +84,7 @@ class TestMapLabel:
             ("Heartbleed", "DoS"),
             ("DDoS", "DDoS"),
             ("PortScan", "Scan"),
-            ("Infiltration", "Scan"),
+            ("Infiltration", "Infiltration"),
             ("FTP-Patator", "BruteForce"),
             ("SSH-Patator", "BruteForce"),
             ("Bot", "Botnet"),

@@ -14,7 +14,7 @@ from typing import Any
 
 import numpy as np
 import structlog
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+from sklearn.metrics import accuracy_score, f1_score, precision_recall_curve, roc_auc_score
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import LabelBinarizer
 
@@ -30,6 +30,87 @@ _TIE_EPSILON: float = 1e-6
 # ============================================================================
 # Public API
 # ============================================================================
+
+
+def best_fbeta_threshold(
+    scores: np.ndarray,
+    y_true: np.ndarray,
+    beta: float = 1.0,
+    n_candidates: int | None = None,
+) -> tuple[float, float]:
+    """
+    Find the anomaly-score threshold that maximises F-beta.
+
+    Shared by both tracks' detectors, which agree on the decision rule —
+    **lower score means more anomalous**::
+
+        score(x) <  t  →  positive (anomaly, 1)
+        score(x) >= t  →  negative (normal, 0)
+
+    Every distinct operating point of the validation set is evaluated in a
+    single vectorised pass, so the result is the **exact** maximiser rather than
+    the best of a fixed grid. Both detectors previously scanned 300 thresholds
+    spread uniformly over ``[min(score), max(score)]``, which is the wrong
+    spacing for Isolation Forest — its scores bunch tightly around the boundary,
+    so a uniform grid spends most of its resolution on empty range and can miss
+    the optimum entirely. It also cost one full ``fbeta_score`` pass per
+    candidate.
+
+    Args:
+        scores: Decision-function scores, shape ``(n,)``.
+        y_true: Binary ground truth, shape ``(n,)``; 1 = anomaly.
+        beta: Recall weight relative to precision. ``beta > 1`` favours recall.
+        n_candidates: Optional cap on the number of operating points evaluated.
+            None — the default — evaluates all of them. When set, candidates are
+            thinned evenly **along the curve**, which is quantile spacing in the
+            score distribution, not the uniform range spacing it replaces.
+
+    Returns:
+        ``(threshold, fbeta)``. When ``y_true`` carries no positive, no
+        threshold can be scored: the median score is returned with an F-beta of
+        0.0 and a warning is logged.
+    """
+    scores = np.asarray(scores, dtype=float)
+    y_true = np.asarray(y_true)
+
+    if scores.size == 0 or int(y_true.sum()) == 0:
+        logger.warning(
+            "fbeta_threshold_undefined",
+            n_samples=int(scores.size),
+            n_positive=int(y_true.sum()) if y_true.size else 0,
+            hint="no positive class in y_true; returning the median score unoptimised",
+        )
+        return (float(np.median(scores)) if scores.size else 0.0), 0.0
+
+    # precision_recall_curve thresholds on `>=`, so it is fed the negated
+    # scores; a candidate `thr` there means `-score >= thr`, i.e. `score <= -thr`.
+    precision, recall, neg_thresholds = precision_recall_curve(y_true, -scores)
+
+    # The curve's trailing point is (precision=1, recall=0) and carries no
+    # threshold: it is the degenerate "flag nothing" operating point, which has
+    # undefined precision in practice and must stay out of the search.
+    precision, recall = precision[:-1], recall[:-1]
+
+    if n_candidates is not None and 0 < n_candidates < len(neg_thresholds):
+        keep = np.unique(np.linspace(0, len(neg_thresholds) - 1, n_candidates).round().astype(int))
+        precision, recall, neg_thresholds = precision[keep], recall[keep], neg_thresholds[keep]
+
+    beta_sq = beta * beta
+    denominator = beta_sq * precision + recall
+    fbeta = np.divide(
+        (1.0 + beta_sq) * precision * recall,
+        denominator,
+        out=np.zeros_like(denominator),
+        where=denominator > 0,
+    )
+
+    best = int(fbeta.argmax())
+
+    # `score <= -thr` is what the curve selected; the detectors apply a strict
+    # `<`. Nudging to the next representable float makes the two identical
+    # instead of differing on exact ties at the boundary.
+    threshold = float(np.nextafter(-neg_thresholds[best], np.inf))
+    return threshold, float(fbeta[best])
 
 
 def compute_metrics(

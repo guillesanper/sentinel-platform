@@ -3,15 +3,22 @@ CICIDS2017 label taxonomy for the flow-based track.
 
 Single source of truth for:
 
-* ``ATTACK_GROUPS`` — the 15 raw CICIDS2017 labels collapsed into 7 canonical
+* ``ATTACK_GROUPS`` — the 15 raw CICIDS2017 labels collapsed into 8 canonical
   classes.
 * ``map_label`` — raw label (as read from the CSVs) → canonical class, or None
   when the label is not recognised. Carries the latin-1 mojibake repair that
   used to be buried in ``utils/loader.py::_map_labels``.
+* ``normalize_raw_label`` — the same repair *without* the collapse, so that the
+  attack tool behind a class stays visible. The temporal split blocks on it.
 * ``CAPTURE_DAYS`` / ``map_capture_day`` — CSV filename → capture day. The
   MachineLearningCVE distribution of CICIDS2017 has no ``Timestamp`` column, so
-  the filename is the only carrier of time. The temporal split partitions by
-  ``(capture_day, class)``.
+  the filename is the only carrier of time.
+
+Note that the collapse is lossy in a way that matters for partitioning, not just
+for reporting: the tools merged into one class ran **sequentially** inside their
+capture day, so a chronological cut on the collapsed class holds whole tools out
+of training. That is why ``ml.flow.loader`` keeps the raw label around and can
+block on it. See ``docs/ml/PARTICION-TEMPORAL.md``.
 
 This taxonomy is intentionally disjoint from ``ml.models.classifier.ATTACK_TYPES``
 (the event-based track): mixing them yields a model that silently predicts
@@ -48,7 +55,7 @@ _EN_DASH: Final[str] = "–"  # noqa: RUF001
 # Class taxonomy
 # ============================================================================
 
-# Raw CICIDS2017 label → canonical 7-class taxonomy.
+# Raw CICIDS2017 label → canonical 8-class taxonomy.
 ATTACK_GROUPS: Final[dict[str, str]] = {
     "BENIGN": "BENIGN",
     "DoS Hulk": "DoS",
@@ -58,7 +65,13 @@ ATTACK_GROUPS: Final[dict[str, str]] = {
     "Heartbleed": "DoS",
     "DDoS": "DDoS",
     "PortScan": "Scan",
-    "Infiltration": "Scan",
+    # Its own class, not a `Scan`. The TFA folded Infiltration's 36 flows into
+    # the 158.930 of PortScan, which merges a host-compromise-and-exfiltration
+    # scenario into port sweeping on the strength of one shared phase. It also
+    # defeated the minority-class filter: `filter_minority_classes` runs *after*
+    # the collapse, so `min_class_samples=100` never saw the 36 rows. Kept
+    # separate, the filter drops it on its own — which is what the filter is for.
+    "Infiltration": "Infiltration",
     "FTP-Patator": "BruteForce",
     "SSH-Patator": "BruteForce",
     f"Web Attack {_EN_DASH} Brute Force": "WebAttack",
@@ -71,12 +84,18 @@ ATTACK_GROUPS: Final[dict[str, str]] = {
 BENIGN_LABEL: Final[str] = "BENIGN"
 
 # Canonical class order (BENIGN first, attacks alphabetical).
+#
+# `Infiltration` is listed even though CICIDS2017 carries only 36 such flows and
+# `filter_minority_classes` therefore drops it from every realistic run. The
+# taxonomy states what the labels mean; whether a class has enough support to be
+# modelled is a separate decision, taken later and logged when it is taken.
 CLASS_ORDER: Final[tuple[str, ...]] = (
     "BENIGN",
     "Botnet",
     "BruteForce",
     "DDoS",
     "DoS",
+    "Infiltration",
     "Scan",
     "WebAttack",
 )
@@ -124,6 +143,32 @@ _WEEKDAYS_CI: Final[frozenset[str]] = frozenset(CAPTURE_DAY_ORDER)
 # ============================================================================
 
 
+def normalize_raw_label(raw: object) -> str:
+    """
+    Clean a raw CICIDS2017 label without collapsing it into its canonical class.
+
+    Same repair :func:`map_label` applies — latin-1 mojibake, then whitespace —
+    but it stops before the ``ATTACK_GROUPS`` lookup, so ``DoS Hulk`` and
+    ``DoS GoldenEye`` stay distinct instead of both becoming ``DoS``. That
+    distinction is what the ``sub-label`` temporal blocking partitions on; see
+    :data:`ml.flow.loader.RAW_LABEL_COL`.
+
+    Args:
+        raw: Label as read from the CSV.
+
+    Returns:
+        The repaired label. Unrecognised values come back cleaned rather than
+        as None — this function does not judge, it only normalises.
+
+    Example:
+        >>> normalize_raw_label("  DoS Hulk ")
+        'DoS Hulk'
+        >>> normalize_raw_label("Web Attack \\u00ef\\u00bf\\u00bd XSS") == "Web Attack \\u2013 XSS"
+        True
+    """
+    return str(raw).replace(_MOJIBAKE_EN_DASH, _EN_DASH).strip()
+
+
 def map_label(raw: object) -> str | None:
     """
     Map a raw CICIDS2017 label to its canonical class.
@@ -149,8 +194,7 @@ def map_label(raw: object) -> str | None:
     """
     if raw is None:
         return None
-    cleaned = str(raw).replace(_MOJIBAKE_EN_DASH, _EN_DASH).strip()
-    return ATTACK_GROUPS.get(cleaned)
+    return ATTACK_GROUPS.get(normalize_raw_label(raw))
 
 
 def map_capture_day(filename: str) -> str:

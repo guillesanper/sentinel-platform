@@ -18,18 +18,41 @@ Two obvious fixes do not work on this distribution:
   class lives on exactly one day, so holding out Friday leaves DDoS, Scan and
   Botnet with zero training samples.
 
-What this module implements instead is a **per-block temporal partition**:
-inside each ``(capture_day, class)`` group, rows are ordered by their position
-in the original capture and cut 70/15/15 chronologically. No test flow precedes
-a train flow within its own scenario, every class survives in all three splits,
-and near-duplicates from a single burst stay contiguous — which is where the
-honesty of the metric is recovered.
+What this module implements instead is a **per-block temporal partition**: inside
+each block, rows are ordered by their position in the original capture and cut
+70/15/15 chronologically. No test flow precedes a train flow within its own
+scenario, every class survives in all three splits, and near-duplicates from a
+single burst stay contiguous — which is where the honesty of the metric is
+recovered.
 
-Two provenance columns make that possible, and they are the single biggest
-footgun in this file: ``capture_day`` and ``order_idx`` are *not* features.
-:func:`get_feature_columns` is the only sanctioned way to select the feature
-matrix; leaking either column into training produces a model that "detects
-Friday" with spectacular metrics and zero value, and nothing raises an error.
+**What defines a block is a choice, not a detail**, and getting it wrong was the
+one conceptual error this module has actually shipped. ``ATTACK_GROUPS``
+collapses 15 raw CICIDS2017 labels into 8 canonical classes, and the sub-attacks of a
+class run *sequentially* within their capture day: Wednesday goes Hulk →
+slowloris → Slowhttptest → GoldenEye, all labelled ``DoS``; Tuesday goes
+FTP-Patator → SSH-Patator, both ``BruteForce``. Blocking by the canonical class
+therefore trains on the early tools and tests on the late ones — a
+novel-attack-tool holdout wearing the costume of a leakage fix. Measured, it
+costs 0.475 of F1-macro on top of the 0.148 the leakage itself was worth.
+
+So the block key is configurable through ``FlowConfig.temporal_block``:
+
+* ``"sub-label"`` (default) blocks by ``(capture_day, raw_label)``. Removes the
+  near-duplicate leakage and nothing else. Answers "how well does the cascade
+  detect the attacks it was trained on, measured honestly?".
+* ``"class"`` blocks by ``(capture_day, Label)``. Additionally demands
+  generalisation to unseen tools — but only for the classes that *have* several
+  tools, so its F1-macro averages a different question per class. Kept, and
+  reported separately, never as the headline.
+
+The full measurement is in ``docs/ml/PARTICION-TEMPORAL.md``.
+
+Three provenance columns make all of that possible, and they are the single
+biggest footgun in this file: ``capture_day``, ``order_idx`` and ``raw_label``
+are *not* features. :func:`get_feature_columns` is the only sanctioned way to
+select the feature matrix; leaking any of them into training produces a model
+that "detects Friday" — or, worse, reads the answer straight off ``raw_label`` —
+with spectacular metrics and zero value, and nothing raises an error.
 """
 
 from pathlib import Path
@@ -41,7 +64,7 @@ import structlog
 from sklearn.model_selection import train_test_split
 
 from ml.flow.config import FlowConfig
-from ml.flow.labels import map_capture_day, map_label
+from ml.flow.labels import map_capture_day, map_label, normalize_raw_label
 
 logger = structlog.get_logger()
 
@@ -60,8 +83,20 @@ CAPTURE_DAY_COL: Final[str] = "capture_day"
 # Monotonic position of the row in load order. See _assign_order_idx.
 ORDER_IDX_COL: Final[str] = "order_idx"
 
+# The label as it appears in the CSV, before ATTACK_GROUPS collapses it. Kept
+# because the collapse is what makes the naive temporal cut misleading: the raw
+# sub-attacks of one canonical class run *sequentially* inside a capture day, so
+# blocking by the canonical class alone silently turns the split into a
+# novel-attack-tool holdout. See docs/ml/PARTICION-TEMPORAL.md.
+RAW_LABEL_COL: Final[str] = "raw_label"
+
 # Everything that must never reach the model. Consumed by get_feature_columns.
-META_COLUMNS: Final[tuple[str, ...]] = (LABEL_COL, CAPTURE_DAY_COL, ORDER_IDX_COL)
+META_COLUMNS: Final[tuple[str, ...]] = (
+    LABEL_COL,
+    CAPTURE_DAY_COL,
+    ORDER_IDX_COL,
+    RAW_LABEL_COL,
+)
 
 # Default held-out day for the day-holdout protocol.
 DEFAULT_TEST_DAYS: Final[tuple[str, ...]] = ("friday",)
@@ -96,18 +131,20 @@ def load_cicids2017(data_path: Path | str) -> pd.DataFrame:
     Load and merge every CICIDS2017 CSV found in ``data_path``.
 
     Column names are stripped of surrounding whitespace, labels are mapped to
-    the 7-class canonical taxonomy (see :mod:`ml.flow.labels`), and rows with
+    the canonical taxonomy (see :mod:`ml.flow.labels`), and rows with
     unrecognised labels are discarded with a warning.
 
-    Two provenance columns are added, without which the temporal partition is
-    impossible: ``capture_day`` (from the filename) and ``order_idx``.
+    Three provenance columns are added, without which the temporal partition is
+    impossible: ``capture_day`` (from the filename), ``order_idx``, and
+    ``raw_label`` — the label as written in the CSV, captured before the
+    canonical mapping overwrites it.
 
     Args:
         data_path: Directory containing the CICIDS2017 CSV files.
 
     Returns:
         Concatenated DataFrame with normalised column names, canonical labels
-        and the two provenance columns.
+        and the three provenance columns.
 
     Raises:
         FileNotFoundError: The directory does not exist or holds no CSV file.
@@ -189,18 +226,21 @@ def clean_dataset(df: pd.DataFrame) -> pd.DataFrame:
     Applied in order:
         1. ±Inf → NaN in the feature columns.
         2. Drop rows carrying NaN in any feature column.
-        3. Drop duplicate rows, compared on **features + label only** — the
-           provenance columns are excluded on purpose, otherwise ``order_idx``
-           (unique by construction) would make every row unique and the
-           deduplication would silently become a no-op.
+        3. Drop duplicate rows, compared on **features + label + raw label**.
+           ``order_idx`` and ``capture_day`` are excluded on purpose: the former
+           is unique by construction and would make every row unique, turning
+           the deduplication into a silent no-op. ``raw_label`` is included
+           because two flows identical in every feature but produced by
+           different attack tools are not the same flow, and collapsing them
+           would quietly bias the sub-label blocking.
         4. Cast the feature columns to float32.
 
     Args:
         df: Frame as returned by :func:`load_cicids2017`.
 
     Returns:
-        Cleaned frame with a fresh RangeIndex. ``capture_day`` and
-        ``order_idx`` are preserved.
+        Cleaned frame with a fresh RangeIndex. The provenance columns are
+        preserved.
     """
     n0 = len(df)
     feature_cols = get_feature_columns(df)
@@ -222,7 +262,10 @@ def clean_dataset(df: pd.DataFrame) -> pd.DataFrame:
             hint="check the CSV encoding; CICIDS2017 normally loses <5% of rows",
         )
 
-    df = df.drop_duplicates(subset=[*feature_cols, LABEL_COL])
+    dedup_on = [*feature_cols, LABEL_COL]
+    if RAW_LABEL_COL in df.columns:
+        dedup_on.append(RAW_LABEL_COL)
+    df = df.drop_duplicates(subset=dedup_on)
     n_after_dup = len(df)
     if n_after_na - n_after_dup > 0:
         logger.info("rows_dropped_duplicates", n_dropped=n_after_na - n_after_dup)
@@ -309,18 +352,19 @@ def stratified_sample(df: pd.DataFrame, config: FlowConfig | None = None) -> pd.
     # groupby().sample() rather than groupby().apply(lambda g: g.sample(...)):
     # the apply form is deprecated in pandas 2.2 (the grouping columns are
     # passed to the callable) and warns on every run.
-    sampled = df.groupby(LABEL_COL, group_keys=False).sample(
+    sampled = df.groupby(LABEL_COL, group_keys=False, observed=True).sample(
         frac=frac, random_state=config.random_seed
     )
 
-    # Per-class rounding leaves a shortfall; top it up from the leftovers.
+    # Per-class rounding leaves a shortfall; top it up from the leftovers. The
+    # top-up is stratified too — drawn flat it would come back ~80% BENIGN,
+    # which is a small but gratuitous dent in a function that promises
+    # proportional sampling.
     shortfall = config.sample_size - len(sampled)
     if shortfall > 0:
         remaining = df.drop(sampled.index)
         if len(remaining) > 0:
-            extra = remaining.sample(
-                n=min(shortfall, len(remaining)), random_state=config.random_seed
-            )
+            extra = _proportional_topup(remaining, shortfall, config.random_seed)
             sampled = pd.concat([sampled, extra])
 
     sampled = sampled.sample(frac=1, random_state=config.random_seed).reset_index(drop=True)
@@ -337,15 +381,21 @@ def split_dataset_temporal(
     df: pd.DataFrame, config: FlowConfig | None = None
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Partition chronologically inside each ``(capture_day, class)`` block.
+    Partition chronologically inside each temporal block.
 
     The default protocol. Rows of a block are ordered by ``order_idx`` and cut
     ``train_ratio``/``val_ratio``/``test_ratio`` by position, so within any one
-    attack scenario no test flow precedes a train flow, while every class keeps
+    attack scenario no test flow precedes a train flow, while every block keeps
     samples in all three splits.
 
+    ``config.temporal_block`` decides what a block is, and the choice is not
+    cosmetic: ``"sub-label"`` (default) keeps every attack tool represented on
+    both sides of the cut, ``"class"`` additionally holds tools out. The module
+    docstring and ``docs/ml/PARTICION-TEMPORAL.md`` carry the measurement.
+
     Args:
-        df: Frame carrying ``Label``, ``capture_day`` and ``order_idx``.
+        df: Frame carrying ``Label``, ``capture_day`` and ``order_idx``, plus
+            ``raw_label`` for the ``"sub-label"`` block key.
         config: Track configuration. Defaults to ``FlowConfig()``.
 
     Returns:
@@ -359,15 +409,19 @@ def split_dataset_temporal(
     config = config or FlowConfig()
     _require_meta_columns(df)
 
+    block_cols = _resolve_block_columns(df, config.temporal_block)
     train, val, test = _temporal_cut(
         df,
         (config.train_ratio, config.val_ratio, config.test_ratio),
         seed=config.random_seed,
+        block_cols=block_cols,
     )
 
     logger.info(
         "dataset_split",
         strategy="temporal",
+        temporal_block=config.temporal_block,
+        block_cols=block_cols,
         n_train=len(train),
         n_val=len(val),
         n_test=len(test),
@@ -424,7 +478,12 @@ def split_dataset_day_holdout(
 
     # Renormalise train/val to the retained days.
     val_frac = config.val_ratio / (config.train_ratio + config.val_ratio)
-    train, val = _temporal_cut(train_pool, (1.0 - val_frac, val_frac), seed=config.random_seed)
+    train, val = _temporal_cut(
+        train_pool,
+        (1.0 - val_frac, val_frac),
+        seed=config.random_seed,
+        block_cols=_resolve_block_columns(train_pool, config.temporal_block),
+    )
 
     train_classes = set(train[LABEL_COL].unique())
     test_classes = set(test[LABEL_COL].unique())
@@ -542,6 +601,51 @@ def split_dataset_by_strategy(
 # ============================================================================
 
 
+def _proportional_topup(remaining: pd.DataFrame, n_needed: int, seed: int) -> pd.DataFrame:
+    """
+    Draw exactly ``n_needed`` rows from ``remaining``, split across classes in
+    proportion to their share of it.
+
+    Used to close the rounding shortfall of :func:`stratified_sample`. The naive
+    version — one more ``groupby().sample(frac=…)`` — cannot do this job: the
+    fraction needed to recover a handful of rows out of hundreds of thousands
+    rounds every group down to zero, so the top-up returns nothing and the
+    caller silently gets fewer rows than it asked for. The allocation here is
+    the largest-remainder method: floor each class's share, then hand the
+    leftover seats to the classes with the largest fractional parts.
+
+    Args:
+        remaining: Rows not already drawn, carrying a ``Label`` column.
+        n_needed: How many rows to return. Capped at ``len(remaining)``.
+        seed: Random seed, so the top-up is reproducible like everything else.
+
+    Returns:
+        A frame of ``min(n_needed, len(remaining))`` rows.
+    """
+    n_needed = min(n_needed, len(remaining))
+    if n_needed <= 0:
+        return remaining.iloc[0:0]
+
+    counts = remaining[LABEL_COL].value_counts()
+    shares = counts / counts.sum() * n_needed
+    take = np.floor(shares).astype(int)
+
+    leftover = n_needed - int(take.sum())
+    if leftover > 0:
+        # Ties break on value_counts' order (most frequent first), which is
+        # deterministic — reproducibility here is a property the whole sampling
+        # path is expected to have.
+        priority = (shares - take).sort_values(ascending=False, kind="mergesort").index[:leftover]
+        take.loc[priority] += 1
+
+    parts = [
+        group.sample(n=int(take[label]), random_state=seed)
+        for label, group in remaining.groupby(LABEL_COL, observed=True)
+        if take.get(label, 0) > 0
+    ]
+    return pd.concat(parts) if parts else remaining.iloc[0:0]
+
+
 def _assign_order_idx(n_rows: int, offset: int) -> np.ndarray:
     """
     Build the ``order_idx`` values for one CSV.
@@ -563,6 +667,11 @@ def _apply_label_mapping(df: pd.DataFrame) -> pd.DataFrame:
         raise KeyError(
             f"Column {LABEL_COL!r} not found. Available columns: {list(df.columns[:10])}..."
         )
+
+    # Snapshot the raw label before the canonical mapping overwrites it. Stored
+    # as a category: 2.8M rows over 15 distinct values.
+    df = df.copy()
+    df[RAW_LABEL_COL] = df[LABEL_COL].map(normalize_raw_label).astype("category")
 
     mapped = df[LABEL_COL].map(map_label)
     unknown = mapped.isna()
@@ -588,13 +697,51 @@ def _apply_label_mapping(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _require_meta_columns(df: pd.DataFrame) -> None:
-    """Raise when the provenance columns needed for a temporal split are absent."""
-    missing = [c for c in META_COLUMNS if c not in df.columns]
+    """
+    Raise when the provenance columns needed for a temporal split are absent.
+
+    ``raw_label`` is deliberately not required: it only refines the block key,
+    and :func:`_resolve_block_columns` degrades to the canonical label without
+    it. The other three have no fallback.
+    """
+    required = (LABEL_COL, CAPTURE_DAY_COL, ORDER_IDX_COL)
+    missing = [c for c in required if c not in df.columns]
     if missing:
         raise KeyError(
             f"Missing column(s) {missing} required for temporal partitioning. "
             "The frame must come from load_cicids2017()."
         )
+
+
+def _resolve_block_columns(df: pd.DataFrame, temporal_block: str) -> list[str]:
+    """
+    Pick the columns that define a temporal block.
+
+    ``"sub-label"`` blocks on the raw CICIDS2017 label so that each attack tool
+    is cut chronologically on its own; ``"class"`` blocks on the collapsed class
+    and therefore also holds out whole tools. See the module docstring for what
+    that difference is worth in F1-macro.
+
+    A frame without ``raw_label`` — one assembled by hand rather than by
+    :func:`load_cicids2017` — falls back to the canonical label with a warning
+    rather than failing, since the fallback is exactly the ``"class"`` protocol
+    and is still a valid partition.
+    """
+    if temporal_block == "class":
+        return [CAPTURE_DAY_COL, LABEL_COL]
+
+    if RAW_LABEL_COL not in df.columns:
+        logger.warning(
+            "temporal_block_fallback_to_class",
+            requested=temporal_block,
+            hint=(
+                f"frame carries no {RAW_LABEL_COL!r} column; blocking by canonical class "
+                "instead, which additionally holds out unseen attack tools"
+            ),
+        )
+        return [CAPTURE_DAY_COL, LABEL_COL]
+
+    return [CAPTURE_DAY_COL, RAW_LABEL_COL]
 
 
 def _block_boundaries(n: int, ratios: tuple[float, ...]) -> list[int]:
@@ -623,20 +770,31 @@ def _block_boundaries(n: int, ratios: tuple[float, ...]) -> list[int]:
     return bounds
 
 
-def _temporal_cut(df: pd.DataFrame, ratios: tuple[float, ...], *, seed: int) -> list[pd.DataFrame]:
+def _temporal_cut(
+    df: pd.DataFrame,
+    ratios: tuple[float, ...],
+    *,
+    seed: int,
+    block_cols: list[str],
+) -> list[pd.DataFrame]:
     """
     Cut ``df`` into ``len(ratios)`` chronological parts inside each block.
 
-    A block is a ``(capture_day, Label)`` group: the finest partition of the
-    capture in which "earlier" is a meaningful statement. Rows are ordered by
-    ``order_idx`` with a stable sort, cut by position, and each resulting part
-    is shuffled — shuffling row order is irrelevant to the guarantee, which is
+    A block is a ``(capture_day, <label>)`` group — the finest partition of the
+    capture in which "earlier" is a meaningful statement. Which label column
+    closes that tuple is :func:`_resolve_block_columns`'s decision and is the
+    whole substance of the ``temporal_block`` setting. Rows are ordered by
+    ``order_idx`` with a stable sort, cut by position, and each resulting part is
+    shuffled — shuffling row order is irrelevant to the guarantee, which is
     carried by the ``order_idx`` values, not by their arrangement.
     """
     n_parts = len(ratios)
     parts: list[list[pd.DataFrame]] = [[] for _ in range(n_parts)]
 
-    for (day, label), block in df.groupby([CAPTURE_DAY_COL, LABEL_COL], sort=True):
+    # observed=True: with raw_label stored as a category, groupby would
+    # otherwise materialise every (day, label) pair the categorical *could*
+    # take, including the ~100 combinations that never occur.
+    for (day, label), block in df.groupby(block_cols, sort=True, observed=True):
         ordered = block.sort_values(ORDER_IDX_COL, kind="mergesort")
         n = len(ordered)
         bounds = _block_boundaries(n, ratios)
@@ -684,15 +842,32 @@ def _temporal_cut(df: pd.DataFrame, ratios: tuple[float, ...], *, seed: int) -> 
 
 
 def _log_split_distribution(train: pd.DataFrame, val: pd.DataFrame, test: pd.DataFrame) -> None:
-    """Emit one structured event per class with its count in each split."""
+    """
+    Emit one structured event per class — and per raw sub-label — with its count
+    in each split.
+
+    The sub-label breakdown is what makes the block-key choice auditable from a
+    run log alone. A ``BruteForce`` line reading train=9684 test=2076 looks
+    perfectly healthy; the two ``split_sublabel_distribution`` lines underneath
+    it, showing FTP-Patator train=7938 test=0 and SSH-Patator train=1746
+    test=2076, are what reveal that the split held out an entire attack tool.
+    """
     splits = {"train": train, "val": val, "test": test}
-    all_classes = sorted(
-        set(train[LABEL_COL].unique())
-        | set(val[LABEL_COL].unique())
-        | set(test[LABEL_COL].unique())
+
+    _log_distribution_over(splits, LABEL_COL, "split_class_distribution")
+    if all(RAW_LABEL_COL in split.columns for split in splits.values()):
+        _log_distribution_over(splits, RAW_LABEL_COL, "split_sublabel_distribution")
+
+
+def _log_distribution_over(splits: dict[str, pd.DataFrame], column: str, event_name: str) -> None:
+    """Emit one event per distinct value of ``column``, warning when any split is empty."""
+    values = sorted(
+        {str(v) for split in splits.values() for v in split[column].unique()},
     )
 
-    for cls in all_classes:
-        counts = {name: int((split[LABEL_COL] == cls).sum()) for name, split in splits.items()}
+    for value in values:
+        counts = {
+            name: int((split[column].astype(str) == value).sum()) for name, split in splits.items()
+        }
         event = logger.warning if min(counts.values()) == 0 else logger.info
-        event("split_class_distribution", label=str(cls), **counts)
+        event(event_name, label=value, **counts)

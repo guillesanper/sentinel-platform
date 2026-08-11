@@ -2,7 +2,7 @@
 Stage 2 attack-type classifier for the flow-based track.
 
 Receives the flows Stage 1 flagged as anomalous and names the attack family
-among the canonical 7-class taxonomy of :mod:`ml.flow.labels`. Supports a
+among the canonical taxonomy of :mod:`ml.flow.labels`. Supports a
 randomised hyperparameter search and gradient-boosting early stopping on a
 held-out validation set. Class imbalance — CICIDS2017 is ~80% BENIGN, and
 Botnet is three orders of magnitude rarer than DoS — is handled with
@@ -85,6 +85,18 @@ class FlowAttackClassifier:
         A ``StratifiedKFold`` splitter keeps the attack-class distribution in
         every fold. The search itself uses no early stopping; :meth:`fit`
         applies it afterwards on the real validation set.
+
+        **The folds are shuffled, so this search is not temporally clean.**
+        ``X_train`` is already the chronologically early slice of each block, but
+        within it the folds are drawn at random, which lets near-duplicates from
+        one attack burst sit on both sides of a fold boundary — the very leakage
+        ``ml.flow.loader`` partitions to avoid. The consequence is bounded: it
+        can bias *which* hyperparameters win, never the reported metrics, which
+        are measured on a test set this function never sees. Making the folds
+        temporal (``order_idx`` does not reach here) would be the strictly
+        correct thing; it is not done because the reference runs use
+        ``--skip-tuning`` and the gain would be invisible next to the effects
+        documented in ``docs/ml/PARTICION-TEMPORAL.md``.
 
         Args:
             X_train: Feature matrix of the anomalous training flows.

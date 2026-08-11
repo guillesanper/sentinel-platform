@@ -10,6 +10,7 @@ The two properties worth protecting here fail *silently* in production:
 """
 
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,7 @@ from ml.flow.loader import (
     LABEL_COL,
     META_COLUMNS,
     ORDER_IDX_COL,
+    RAW_LABEL_COL,
     clean_dataset,
     filter_minority_classes,
     get_feature_columns,
@@ -32,7 +34,7 @@ from ml.flow.loader import (
     split_dataset_temporal,
     stratified_sample,
 )
-from tests.conftest import CICIDS_MINI_FEATURES
+from tests.conftest import CICIDS_MINI_FEATURES, CICIDS_MINI_MULTI_TOOL_CLASSES
 
 # ============================================================================
 # Helpers
@@ -45,9 +47,25 @@ def mini_df(cicids_mini_csv: Path) -> pd.DataFrame:
     return clean_dataset(load_cicids2017(cicids_mini_csv))
 
 
-def _blocks(df: pd.DataFrame) -> set[tuple[str, str]]:
-    """The set of (capture_day, class) blocks present in a frame."""
-    return set(map(tuple, df[[CAPTURE_DAY_COL, LABEL_COL]].drop_duplicates().to_numpy()))
+def _blocks(df: pd.DataFrame, label_col: str = RAW_LABEL_COL) -> set[tuple[str, str]]:
+    """
+    The set of ``(capture_day, label)`` blocks present in a frame.
+
+    Defaults to the **raw** label, because that is what the default
+    ``temporal_block="sub-label"`` protocol actually cuts on. Blocking by the
+    canonical class is a coarser, different partition — the one that holds whole
+    attack tools out — so the tests that mean *that* one pass ``LABEL_COL``
+    explicitly.
+    """
+    return set(
+        map(tuple, df[[CAPTURE_DAY_COL, label_col]].astype(str).drop_duplicates().to_numpy())
+    )
+
+
+def _order_in_block(df: pd.DataFrame, day: str, label: str, label_col: str) -> pd.Series:
+    """The ``order_idx`` values of one block within one split."""
+    mask = (df[CAPTURE_DAY_COL].astype(str) == day) & (df[label_col].astype(str) == label)
+    return df.loc[mask, ORDER_IDX_COL]
 
 
 class _LogSpy:
@@ -192,6 +210,17 @@ class TestGetFeatureColumns:
 
     def test_every_meta_column_is_excluded(self, mini_df: pd.DataFrame):
         assert not set(get_feature_columns(mini_df)) & set(META_COLUMNS)
+
+    def test_raw_label_is_not_a_feature(self, mini_df: pd.DataFrame):
+        """
+        The newest provenance column and the most dangerous of the four:
+        ``capture_day`` is merely a near-perfect proxy for the label, while
+        ``raw_label`` *is* the label, uncollapsed. A model handed it scores a
+        flawless 1.0 and has learned nothing.
+        """
+        assert RAW_LABEL_COL in mini_df.columns
+        assert RAW_LABEL_COL in META_COLUMNS
+        assert RAW_LABEL_COL not in get_feature_columns(mini_df)
 
     def test_real_features_are_kept_in_frame_order(self, mini_df: pd.DataFrame):
         assert get_feature_columns(mini_df) == list(CICIDS_MINI_FEATURES)
@@ -375,6 +404,38 @@ class TestStratifiedSample:
         assert len(out) == 7
         assert out[ORDER_IDX_COL].is_unique
 
+    def test_the_top_up_is_stratified_too(self):
+        """
+        Drawn flat, the rows closing the rounding gap come back at the dataset's
+        ~80% BENIGN rate — a small but gratuitous dent in a function whose whole
+        job is proportional sampling. The allocation is checked directly because
+        through ``stratified_sample`` the top-up is a handful of rows and a flat
+        draw would usually pass by luck.
+        """
+        remaining = pd.DataFrame(
+            {
+                "Flow Duration": np.arange(100, dtype=float),
+                LABEL_COL: ["BENIGN"] * 80 + ["DoS"] * 10 + ["DDoS"] * 10,
+                CAPTURE_DAY_COL: ["monday"] * 100,
+                ORDER_IDX_COL: np.arange(100),
+            }
+        )
+        topped = loader_module._proportional_topup(remaining, 10, seed=42)
+
+        assert len(topped) == 10
+        assert topped[LABEL_COL].value_counts().to_dict() == {"BENIGN": 8, "DoS": 1, "DDoS": 1}
+
+    def test_the_top_up_cannot_ask_for_more_rows_than_exist(self):
+        remaining = pd.DataFrame(
+            {
+                "Flow Duration": [1.0, 2.0],
+                LABEL_COL: ["BENIGN", "DoS"],
+                CAPTURE_DAY_COL: ["monday"] * 2,
+                ORDER_IDX_COL: [0, 1],
+            }
+        )
+        assert len(loader_module._proportional_topup(remaining, 50, seed=42)) == 2
+
 
 # ============================================================================
 # Temporal partitioning — the centre of the plan
@@ -402,15 +463,23 @@ class TestSplitDatasetTemporal:
             assert _blocks(split) == expected
 
     def test_train_strictly_precedes_val_and_test_inside_each_block(self, mini_df: pd.DataFrame):
-        """No future→past leakage within a scenario. The whole point."""
+        """
+        No future→past leakage within a scenario. The whole point.
+
+        The guarantee is *per block*, and under the default protocol a block is
+        a ``(day, raw_label)`` pair. It deliberately does **not** hold per
+        canonical class: Tuesday runs FTP-Patator and then SSH-Patator, both
+        ``BruteForce``, so SSH-Patator's training rows come after FTP-Patator's
+        test rows. That interleaving is the point of blocking by sub-label —
+        every tool is cut on its own timeline — and
+        ``test_class_level_order_is_deliberately_not_preserved`` pins it.
+        """
         train, val, test = split_dataset_temporal(mini_df)
 
-        for block in _blocks(mini_df):
-            day, label = block
+        for day, label in _blocks(mini_df):
 
             def _order(split, day=day, label=label):
-                mask = (split[CAPTURE_DAY_COL] == day) & (split[LABEL_COL] == label)
-                return split.loc[mask, ORDER_IDX_COL]
+                return _order_in_block(split, day, label, RAW_LABEL_COL)
 
             train_idx, val_idx, test_idx = _order(train), _order(val), _order(test)
             assert train_idx.max() < val_idx.min()
@@ -514,6 +583,159 @@ class TestSplitDatasetTemporal:
 
 
 # ============================================================================
+# The block key — what the temporal cut is actually cutting
+# ============================================================================
+
+
+class TestTemporalBlockKey:
+    """
+    Pins the conceptual error this module shipped, and its fix.
+
+    ``ATTACK_GROUPS`` collapses the raw CICIDS2017 labels into canonical
+    classes, and the tools behind one class ran **one after the other** inside
+    their capture day. Cutting chronologically on the canonical class therefore
+    trains on the early tool and tests on the late one — a novel-attack-tool
+    holdout wearing the costume of a leakage fix, and worth 0.47 of F1-macro on
+    the real captures.
+
+    The fixture reproduces the mechanism at small scale: Tuesday runs
+    FTP-Patator then SSH-Patator (both ``BruteForce``), Wednesday runs DoS Hulk
+    then DoS GoldenEye (both ``DoS``). See
+    :data:`tests.conftest.CICIDS_MINI_FILES` and docs/ml/PARTICION-TEMPORAL.md.
+    """
+
+    # 50/25/25 rather than the default 70/15/15: the fixture splits its attack
+    # window evenly between two tools, so a cut at the halfway mark lands
+    # exactly on the handover and the two protocols separate completely. Under
+    # 70/15/15 the second tool merely *dominates* test instead of owning it,
+    # which is the same defect measured less sharply.
+    RATIOS: ClassVar[dict[str, float]] = {
+        "train_ratio": 0.5,
+        "val_ratio": 0.25,
+        "test_ratio": 0.25,
+    }
+
+    def _tools(self, df: pd.DataFrame, canonical_class: str) -> set[str]:
+        """The raw attack tools present for one canonical class."""
+        return set(df.loc[df[LABEL_COL] == canonical_class, RAW_LABEL_COL].astype(str))
+
+    @pytest.mark.parametrize("canonical_class", CICIDS_MINI_MULTI_TOOL_CLASSES)
+    def test_sub_label_blocking_keeps_every_tool_in_all_three_splits(
+        self, mini_df: pd.DataFrame, canonical_class: str
+    ):
+        """The default protocol: each tool is cut on its own timeline."""
+        config = FlowConfig(temporal_block="sub-label", **self.RATIOS)
+        train, val, test = split_dataset_temporal(mini_df, config)
+
+        expected = self._tools(mini_df, canonical_class)
+        assert len(expected) > 1, "the fixture must supply more than one tool to be meaningful"
+        for split in (train, val, test):
+            assert self._tools(split, canonical_class) == expected
+
+    @pytest.mark.parametrize("canonical_class", CICIDS_MINI_MULTI_TOOL_CLASSES)
+    def test_class_blocking_holds_a_whole_tool_out_of_training(
+        self, mini_df: pd.DataFrame, canonical_class: str
+    ):
+        """
+        The same rows, the same chronological guarantee, one different key —
+        and the test set is now made entirely of a tool that never appeared in
+        training. Any per-class F1 measured this way answers "does it generalise
+        to an unseen tool?", not "does it detect what it was trained on?".
+        """
+        config = FlowConfig(temporal_block="class", **self.RATIOS)
+        train, _, test = split_dataset_temporal(mini_df, config)
+
+        in_train = self._tools(train, canonical_class)
+        in_test = self._tools(test, canonical_class)
+
+        assert in_test, "test must still carry the class, or the comparison is vacuous"
+        assert not (in_test & in_train), "the whole point: test's tool is absent from train"
+        assert self._tools(mini_df, canonical_class) == in_train | in_test
+
+    def test_the_two_protocols_partition_the_same_rows(self, mini_df: pd.DataFrame):
+        """
+        Blocking is a choice about *where* the line falls, not about which rows
+        take part. Neither protocol drops or invents anything, which is what
+        makes the F1-macro gap between them attributable to the key alone.
+        """
+        fine = split_dataset_temporal(
+            mini_df, FlowConfig(temporal_block="sub-label", **self.RATIOS)
+        )
+        coarse = split_dataset_temporal(mini_df, FlowConfig(temporal_block="class", **self.RATIOS))
+
+        assert set(pd.concat(fine)[ORDER_IDX_COL]) == set(mini_df[ORDER_IDX_COL])
+        assert set(pd.concat(coarse)[ORDER_IDX_COL]) == set(mini_df[ORDER_IDX_COL])
+
+    def test_the_block_key_is_recorded_in_the_split_log(
+        self, mini_df: pd.DataFrame, log_spy: _LogSpy
+    ):
+        """
+        A run log that does not say which key was used cannot be read back: the
+        same F1-macro means two different things under the two protocols.
+        """
+        split_dataset_temporal(mini_df, FlowConfig(temporal_block="class"))
+
+        payload = log_spy.payloads("dataset_split")[0]
+        assert payload["temporal_block"] == "class"
+        assert payload["block_cols"] == [CAPTURE_DAY_COL, LABEL_COL]
+
+    def test_sub_label_distribution_is_logged(self, mini_df: pd.DataFrame, log_spy: _LogSpy):
+        """
+        The breakdown that makes the defect visible from a log alone: a healthy
+        looking ``BruteForce`` line hides FTP-Patator test=0 underneath it.
+        """
+        split_dataset_temporal(mini_df, FlowConfig(temporal_block="class", **self.RATIOS))
+
+        logged = {payload["label"] for payload in log_spy.payloads("split_sublabel_distribution")}
+        assert {"FTP-Patator", "SSH-Patator"} <= logged
+
+        starved = [
+            payload
+            for payload in log_spy.payloads("split_sublabel_distribution")
+            if payload["label"] == "FTP-Patator"
+        ]
+        assert starved and starved[0]["test"] == 0
+
+    def test_a_frame_without_raw_label_falls_back_to_class_blocking(self, log_spy: _LogSpy):
+        """
+        Frames assembled by hand — as several tests here do — carry no
+        ``raw_label``. Refusing to split them would be a gratuitous break, and
+        silently splitting them would hide that a coarser key was used, so the
+        fallback is taken *and* announced.
+        """
+        n = 400
+        df = pd.DataFrame(
+            {
+                "Flow Duration": np.arange(n, dtype=float),
+                LABEL_COL: ["DoS"] * n,
+                CAPTURE_DAY_COL: ["wednesday"] * n,
+                ORDER_IDX_COL: np.arange(n),
+            }
+        )
+        train, val, test = split_dataset_temporal(df, FlowConfig(temporal_block="sub-label"))
+
+        assert "temporal_block_fallback_to_class" in log_spy.names("warning")
+        assert len(train) + len(val) + len(test) == n
+
+    def test_raw_label_keeps_distinct_tools_out_of_the_deduplication(self):
+        """
+        Two flows identical in every feature but produced by different tools are
+        not the same flow. Collapsing them would quietly thin whichever tool ran
+        second — the one the block key exists to protect.
+        """
+        df = pd.DataFrame(
+            {
+                "Flow Duration": [1.0, 1.0],
+                LABEL_COL: ["DoS", "DoS"],
+                RAW_LABEL_COL: ["DoS Hulk", "DoS GoldenEye"],
+                CAPTURE_DAY_COL: ["wednesday", "wednesday"],
+                ORDER_IDX_COL: [0, 1],
+            }
+        )
+        assert len(clean_dataset(df)) == 2
+
+
+# ============================================================================
 # Random split — kept only to quantify the leakage
 # ============================================================================
 
@@ -539,13 +761,9 @@ class TestSplitDatasetRandom:
         """
         train, _, test = split_dataset(mini_df)
         leaks = 0
-        for day, label in _blocks(mini_df):
-            tr = train.loc[
-                (train[CAPTURE_DAY_COL] == day) & (train[LABEL_COL] == label), ORDER_IDX_COL
-            ]
-            te = test.loc[
-                (test[CAPTURE_DAY_COL] == day) & (test[LABEL_COL] == label), ORDER_IDX_COL
-            ]
+        for day, label in _blocks(mini_df, LABEL_COL):
+            tr = _order_in_block(train, day, label, LABEL_COL)
+            te = _order_in_block(test, day, label, LABEL_COL)
             if len(tr) and len(te) and tr.max() > te.min():
                 leaks += 1
         assert leaks > 0

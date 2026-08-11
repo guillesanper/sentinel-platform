@@ -12,6 +12,7 @@ import pytest
 import ml.flow.config as flow_config_module
 from ml.flow.config import (
     SPLIT_STRATEGIES,
+    TEMPORAL_BLOCKS,
     FlowConfig,
     IsolationForestConfig,
     NeuralNetworkConfig,
@@ -33,6 +34,16 @@ class TestFlowConfigDefaults:
     def test_default_split_strategy_is_temporal(self):
         """The random split is the leaky one; temporal must be the default."""
         assert FlowConfig().split_strategy == "temporal"
+
+    def test_default_temporal_block_is_sub_label(self):
+        """
+        The default has to answer "how much does the cascade detect, measured
+        honestly?" — which means removing the near-duplicate leakage and nothing
+        else. Blocking by the collapsed class also holds whole attack tools out
+        of training, a harder and different question that belongs in a separate,
+        separately reported run. See docs/ml/PARTICION-TEMPORAL.md.
+        """
+        assert FlowConfig().temporal_block == "sub-label"
 
     def test_default_paths_are_path_objects(self):
         config = FlowConfig()
@@ -157,6 +168,18 @@ class TestValidation:
 
     def test_split_strategies_are_the_three_documented_protocols(self):
         assert set(SPLIT_STRATEGIES) == {"temporal", "random", "day-holdout"}
+
+    @pytest.mark.parametrize("block", TEMPORAL_BLOCKS)
+    def test_accepts_every_declared_temporal_block(self, block):
+        assert FlowConfig(temporal_block=block).temporal_block == block
+
+    @pytest.mark.parametrize("block", ["sublabel", "raw", "Class", "label", ""])
+    def test_rejects_unknown_temporal_block(self, block):
+        with pytest.raises(ValueError, match="Unknown temporal_block"):
+            FlowConfig(temporal_block=block)
+
+    def test_temporal_blocks_are_the_two_documented_keys(self):
+        assert set(TEMPORAL_BLOCKS) == {"sub-label", "class"}
 
 
 # ============================================================================

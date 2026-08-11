@@ -218,6 +218,11 @@ class CascadeMLPPipeline(BaseCascadePipeline):
         Returns:
             ``accuracy``, ``f1_macro``, ``f1_weighted`` and the Stage 1
             operating point when available.
+
+        Note:
+            Stage 1 is measured on ``X_test``, not on the validation set its
+            threshold was selected from — see
+            :meth:`~ml.flow.pipelines.cascade_xgb.CascadeXGBPipeline.evaluate`.
         """
         y_pred = self.predict(X_test)
 
@@ -228,10 +233,11 @@ class CascadeMLPPipeline(BaseCascadePipeline):
         }
 
         try:
-            op = self._if_model.get_operating_point_info()
+            selection = self._if_model.get_operating_point_info()
         except RuntimeError:
             pass
         else:
+            op = self._if_model.measure_operating_point(X_test, y_test, beta=selection["beta"])
             metrics["if_precision"] = op["precision"]
             metrics["if_recall"] = op["recall"]
             metrics["if_fpr"] = op["fpr"]

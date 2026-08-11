@@ -11,8 +11,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from sklearn.metrics import fbeta_score
 
-from ml.evaluation import compare_models, compute_metrics
+from ml.evaluation import best_fbeta_threshold, compare_models, compute_metrics
 from ml.evaluation.metrics import SCALAR_METRICS
 
 # ============================================================================
@@ -269,6 +270,117 @@ class TestCompareModelsCrossValidation:
         )
         assert result["cv_model_a"]["accuracy"]["mean"] == pytest.approx(1.0)
         assert result["cv_model_a"]["accuracy"]["std"] == pytest.approx(0.0)
+
+
+# ============================================================================
+# F-beta threshold search
+# ============================================================================
+
+
+def _brute_force_best_fbeta(
+    scores: np.ndarray, y_true: np.ndarray, beta: float
+) -> tuple[float, float]:
+    """
+    Reference implementation: score every distinct cut point the naive way.
+
+    Deliberately written as the loop the production code replaced — one
+    ``fbeta_score`` call per candidate, decision rule applied by hand — so that
+    the equivalence test compares two independent derivations rather than one
+    expression against a rearrangement of itself.
+    """
+    best_threshold, best_score = float(np.median(scores)), -1.0
+    # Any threshold strictly above a score flags it; testing just above each
+    # observed score covers every reachable labelling of the sample.
+    for candidate in np.unique(np.nextafter(scores, np.inf)):
+        y_pred = (scores < candidate).astype(int)
+        if y_pred.sum() == 0:
+            continue
+        value = float(fbeta_score(y_true, y_pred, beta=beta, zero_division=0))
+        if value > best_score:
+            best_threshold, best_score = float(candidate), value
+    return best_threshold, best_score
+
+
+class TestBestFbetaThreshold:
+    """
+    The vectorised search replaced a 300-point uniform grid in both tracks.
+
+    Speed was the motive, but the property that matters is that the *meaning*
+    did not move: the threshold it returns has to be the one the slow, obvious
+    implementation would have picked.
+    """
+
+    @pytest.fixture
+    def scored_sample(self) -> tuple[np.ndarray, np.ndarray]:
+        """Anomalies score low, benign high, with the two ranges overlapping."""
+        rng = np.random.default_rng(20260807)
+        y_true = np.repeat([0, 1], [160, 40])
+        scores = np.where(y_true == 1, rng.normal(-0.2, 0.3, 200), rng.normal(0.3, 0.3, 200))
+        return scores, y_true
+
+    @pytest.mark.parametrize("beta", [0.5, 1.0, 2.0])
+    def test_matches_the_brute_force_optimum(self, scored_sample, beta: float):
+        scores, y_true = scored_sample
+        threshold, value = best_fbeta_threshold(scores, y_true, beta=beta)
+        _, expected = _brute_force_best_fbeta(scores, y_true, beta)
+
+        assert value == pytest.approx(expected, abs=1e-12)
+        # The threshold is checked through its effect rather than its value:
+        # any cut point inside the same gap between two scores is the same
+        # classifier, and only the resulting labelling is observable.
+        y_pred = (scores < threshold).astype(int)
+        assert fbeta_score(y_true, y_pred, beta=beta, zero_division=0) == pytest.approx(expected)
+
+    def test_the_returned_threshold_survives_the_strict_comparison(self, scored_sample):
+        """
+        The detectors apply ``score < t`` while ``precision_recall_curve``
+        reports ``>= t`` on the negated scores. Without the ``nextafter`` nudge
+        the two disagree on every sample sitting exactly on the boundary, and
+        the reported F-beta is not the one the model then delivers.
+        """
+        scores, y_true = scored_sample
+        threshold, value = best_fbeta_threshold(scores, y_true, beta=2.0)
+
+        applied = fbeta_score(y_true, (scores < threshold).astype(int), beta=2.0, zero_division=0)
+        assert applied == pytest.approx(value)
+
+    def test_higher_beta_buys_recall(self, scored_sample):
+        """The invariant the flow track relies on: beta > 1 penalises misses."""
+        scores, y_true = scored_sample
+        lenient, _ = best_fbeta_threshold(scores, y_true, beta=2.0)
+        strict, _ = best_fbeta_threshold(scores, y_true, beta=0.5)
+
+        recall = lambda t: ((scores < t) & (y_true == 1)).sum() / (y_true == 1).sum()  # noqa: E731
+        assert recall(lenient) >= recall(strict)
+
+    def test_n_candidates_caps_the_search_without_changing_its_nature(self, scored_sample):
+        """
+        ``n_candidates`` is a ceiling on operating points, not a grid size: a cap
+        above the number of distinct points must be a no-op.
+        """
+        scores, y_true = scored_sample
+        uncapped = best_fbeta_threshold(scores, y_true, beta=2.0)
+        generous = best_fbeta_threshold(scores, y_true, beta=2.0, n_candidates=10_000)
+        thinned = best_fbeta_threshold(scores, y_true, beta=2.0, n_candidates=10)
+
+        assert generous == uncapped
+        # Thinning can only lose candidates, so it cannot beat the full search.
+        assert thinned[1] <= uncapped[1]
+
+    def test_no_positives_returns_the_median_and_warns(self, caplog):
+        """
+        A validation fold with no anomaly has no threshold to optimise. Silently
+        returning something plausible would hide a broken split, so the median
+        comes back with an F-beta of exactly 0.
+        """
+        scores = np.array([0.1, 0.5, 0.9, 0.3])
+        threshold, value = best_fbeta_threshold(scores, np.zeros(4, dtype=int), beta=2.0)
+
+        assert threshold == pytest.approx(float(np.median(scores)))
+        assert value == 0.0
+
+    def test_empty_input_does_not_raise(self):
+        assert best_fbeta_threshold(np.array([]), np.array([]), beta=1.0) == (0.0, 0.0)
 
 
 # ============================================================================

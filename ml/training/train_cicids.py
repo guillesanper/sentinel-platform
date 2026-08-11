@@ -48,7 +48,7 @@ import structlog
 from sklearn.metrics import classification_report
 
 from ml.evaluation.metrics import compare_models
-from ml.flow.config import SPLIT_STRATEGIES, FlowConfig
+from ml.flow.config import SPLIT_STRATEGIES, TEMPORAL_BLOCKS, FlowConfig
 from ml.flow.labels import BENIGN_LABEL, CLASS_ORDER
 from ml.flow.loader import (
     DEFAULT_TEST_DAYS,
@@ -145,6 +145,7 @@ def _build_config(
     output_dir: str,
     sample_size: int,
     split: str,
+    temporal_block: str,
     beta: float,
     seed: int,
 ) -> FlowConfig:
@@ -157,6 +158,9 @@ def _build_config(
         sample_size: Target stratified sample size; 0 uses the full dataset.
         split: Partitioning protocol, one of
             :data:`~ml.flow.config.SPLIT_STRATEGIES`.
+        temporal_block: What defines a temporal block, one of
+            :data:`~ml.flow.config.TEMPORAL_BLOCKS`. Ignored by ``--split
+            random``.
         beta: F-beta weight for the Stage 1 threshold search.
         seed: Global random seed.
 
@@ -173,6 +177,7 @@ def _build_config(
         output_path=Path(output_dir),
         sample_size=sample_size,
         split_strategy=split,
+        temporal_block=temporal_block,
         beta=beta,
         random_seed=seed,
     )
@@ -619,18 +624,38 @@ def _plot_comparison(
 # ============================================================================
 
 
-def _operating_point(pipeline: Cascade) -> dict[str, Any] | None:
+def _operating_points(pipeline: Cascade, dataset: _Dataset) -> dict[str, Any] | None:
     """
-    Stage 1 threshold diagnostics, or None when no search ever ran.
+    Stage 1 diagnostics on both the selection set and the test set.
 
-    Returns None rather than zeros for the same reason the event track does: a
-    fabricated operating point in the training record is worse than an absent
-    one.
+    The two are recorded side by side, and separately, because they answer
+    different questions and were for a while conflated:
+
+    * ``selection`` — measured on validation, where the F-beta search *chose*
+      the threshold. It is a fit statistic. Keeping it makes the choice
+      auditable and lets a reader see how far the search reached.
+    * ``test`` — the same frozen threshold measured on held-out data. This is
+      the one that estimates behaviour on unseen traffic, and the only one that
+      belongs in a results table.
+
+    On CICIDS2017 under the default protocol they differ by 18 points of recall
+    (0.986 → 0.804), because validation is the middle slice of each temporal
+    block and test is the last one. Stage 1's recall is a hard ceiling for the
+    cascade, so publishing the selection number understates the miss rate by
+    more than an order of magnitude.
+
+    Returns None rather than zeros when no search ever ran: a fabricated
+    operating point in the training record is worse than an absent one.
     """
     try:
-        return dict(pipeline.get_if_operating_point())
+        selection = dict(pipeline.get_if_operating_point())
     except RuntimeError:
         return None
+
+    test = pipeline.if_model.measure_operating_point(
+        dataset.X_test, dataset.y_test, beta=selection["beta"]
+    )
+    return {"selection": selection, "test": test}
 
 
 def _build_summary(
@@ -668,6 +693,11 @@ def _build_summary(
         },
         "split": {
             "strategy": config.split_strategy,
+            # Null under `random`, which has no blocks at all — recording the
+            # config default there would suggest a choice that was never made.
+            "temporal_block": (
+                config.temporal_block if config.split_strategy != "random" else None
+            ),
             "train_ratio": config.train_ratio,
             "val_ratio": config.val_ratio,
             "test_ratio": config.test_ratio,
@@ -683,8 +713,11 @@ def _build_summary(
             "pipelines": sorted(metrics),
         },
         "metrics": metrics,
+        # Two entries per cascade — `selection` (validation, where the threshold
+        # was chosen) and `test` (held out). The `if_*` keys inside `metrics`
+        # mirror the `test` one.
         "stage1_operating_point": {
-            pipeline.name: _operating_point(pipeline) for pipeline in trained.values()
+            pipeline.name: _operating_points(pipeline, dataset) for pipeline in trained.values()
         },
         "comparison": comparison["comparison"] if comparison is not None else None,
         "model_paths": model_paths,
@@ -735,9 +768,23 @@ def _build_summary(
     default=_CONFIG_DEFAULTS.split_strategy,
     show_default=True,
     help=(
-        "Partitioning protocol. 'temporal' cuts each (capture day, class) block "
-        "chronologically; 'random' is the TFA's leaky row-wise split, kept to "
-        "quantify the leakage; 'day-holdout' reserves whole capture days."
+        "Partitioning protocol. 'temporal' cuts each block chronologically; "
+        "'random' is the TFA's leaky row-wise split, kept to quantify the "
+        "leakage; 'day-holdout' reserves whole capture days."
+    ),
+)
+@click.option(
+    "--temporal-block",
+    type=click.Choice(list(TEMPORAL_BLOCKS)),
+    default=_CONFIG_DEFAULTS.temporal_block,
+    show_default=True,
+    help=(
+        "What defines a temporal block. 'sub-label' blocks by raw CICIDS2017 "
+        "label, so every attack tool appears in train, val and test — this "
+        "isolates the near-duplicate leakage. 'class' blocks by the collapsed "
+        "canonical label, which additionally holds unseen attack tools out of "
+        "training and measures a different, harder question. Ignored by "
+        "--split random. See docs/ml/PARTICION-TEMPORAL.md."
     ),
 )
 @click.option(
@@ -791,6 +838,7 @@ def main(
     sample_size: int,
     pipeline: str,
     split: str,
+    temporal_block: str,
     test_days: tuple[str, ...],
     beta: float,
     skip_tuning: bool,
@@ -822,6 +870,10 @@ def main(
         python -m ml.training.train_cicids --data-dir api/csvs --split random \\
             --sample-size 200000 --skip-tuning --output-dir /tmp/flow-random
 
+        # The harder question: generalisation to an unseen attack tool
+        python -m ml.training.train_cicids --data-dir api/csvs --temporal-block class \\
+            --sample-size 200000 --skip-tuning --output-dir /tmp/flow-novel-tool
+
         # Both cascades, with figures
         python -m ml.training.train_cicids --data-dir api/csvs --pipeline both --plots
     """
@@ -832,6 +884,7 @@ def main(
         output_dir=output_dir,
         sample_size=sample_size,
         split=split,
+        temporal_block=temporal_block,
         beta=beta,
         seed=seed,
     )
@@ -846,6 +899,7 @@ def main(
         sample_size=config.sample_size,
         pipeline=pipeline,
         split=config.split_strategy,
+        temporal_block=config.temporal_block,
         beta=config.beta,
         skip_tuning=skip_tuning,
         seed=config.random_seed,

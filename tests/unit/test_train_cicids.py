@@ -55,6 +55,7 @@ class TestBuildConfig:
             "output_dir": "models/flow",
             "sample_size": 5000,
             "split": "temporal",
+            "temporal_block": "sub-label",
             "beta": 2.0,
             "seed": 7,
         }
@@ -314,7 +315,36 @@ class TestFlowTrainingCli:
         metrics = summary["metrics"]["cascade_xgb"]
         assert 0.0 <= metrics["accuracy"] <= 1.0
         assert 0.0 <= metrics["f1_macro"] <= 1.0
-        assert 0.0 <= summary["stage1_operating_point"]["cascade_xgb"]["recall"] <= 1.0
+        assert 0.0 <= summary["stage1_operating_point"]["cascade_xgb"]["test"]["recall"] <= 1.0
+
+    def test_the_summary_separates_the_stage1_selection_point_from_the_test_one(
+        self, cicids_mini_csv: Path, tmp_path: Path
+    ) -> None:
+        """
+        Stage 1's threshold is the argmax of F-beta on validation, so the
+        operating point measured there is a fit statistic. Recording it as if it
+        were held-out performance understated the miss rate of the real run by
+        more than an order of magnitude — and Stage 1's recall is the ceiling
+        the whole cascade inherits. Both points are kept, and labelled.
+        """
+        summary = _invoke(cicids_mini_csv, tmp_path / "flow-op")
+
+        operating_point = summary["stage1_operating_point"]["cascade_xgb"]
+        assert set(operating_point) == {"selection", "test"}
+
+        for point in operating_point.values():
+            assert {"precision", "recall", "fpr", "fnr", "tp", "fp", "tn", "fn"} <= set(point)
+            assert 0.0 <= point["recall"] <= 1.0
+
+        # The two are measured on different sets, so their confusion matrices
+        # must not be the same object read twice.
+        selection, test = operating_point["selection"], operating_point["test"]
+        assert selection["threshold"] == test["threshold"]
+        assert sum(selection[k] for k in ("tp", "fp", "tn", "fn")) == summary["data"]["val_size"]
+        assert sum(test[k] for k in ("tp", "fp", "tn", "fn")) == summary["data"]["test_size"]
+
+        # What `metrics` publishes is the held-out figure, not the selection one.
+        assert summary["metrics"]["cascade_xgb"]["if_recall"] == test["recall"]
 
     def test_day_holdout_records_the_days_it_held_out(
         self, cicids_mini_csv: Path, tmp_path: Path

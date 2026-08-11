@@ -97,6 +97,12 @@ FLOW_ATTACK_RECOMMENDATIONS: Final[dict[str, list[str]]] = {
         "Tune connection and request timeouts",
         "Verify whether the service degraded or stayed available",
     ],
+    "Infiltration": [
+        "Isolate the compromised host immediately — assume interactive control",
+        "Hunt for outbound transfers to the destination from every other host",
+        "Preserve volatile state and image the host before remediation",
+        "Rotate credentials and keys reachable from the compromised host",
+    ],
     "Scan": [
         "Monitor the source for follow-up exploitation attempts",
         "Verify which ports actually answered",
@@ -384,7 +390,10 @@ class FlowFusionLayer:
             explanations.append(f"Targets a sensitive service: {service} (port {dst_port})")
 
         # Rule 6: families whose consequences are worst if the call is right.
-        if attack_type in ("Botnet", "WebAttack"):
+        # Infiltration sits here rather than with the noisier families: it names
+        # a host already under interactive control, which is the one outcome
+        # worse than the traffic that leads to it.
+        if attack_type in ("Botnet", "Infiltration", "WebAttack"):
             score += 0.2
             explanations.append(f"High-risk attack family: {attack_type}")
         elif attack_type in ("DDoS", "DoS", "BruteForce"):

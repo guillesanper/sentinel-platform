@@ -280,6 +280,64 @@ class TestOperatingPointInfo:
         assert "f0.5_score" in detector.get_operating_point_info()
 
 
+class TestMeasureOperatingPoint:
+    """Measuring the frozen threshold on a set it was not chosen on."""
+
+    def test_measuring_on_the_selection_set_reproduces_the_stored_point(self, overlapping_data):
+        """
+        The two paths compute the same quantity, so on the same data they must
+        agree exactly — including the F-beta, which optimize_threshold takes
+        from the PR curve and this one recomputes from the confusion matrix.
+        """
+        X_train, y_train, X_val, y_val = overlapping_data
+        detector = _fitted_detector(X_train, y_train)
+        detector.optimize_threshold(X_val, y_val, beta=2.0)
+
+        assert detector.measure_operating_point(X_val, y_val) == (
+            detector.get_operating_point_info()
+        )
+
+    def test_measures_against_the_set_it_is_given(self, overlapping_data):
+        """The confusion matrix must count the rows handed in, not the ones the
+        threshold was selected on — that conflation is the bug this exists for."""
+        X_train, y_train, X_val, y_val = overlapping_data
+        detector = _fitted_detector(X_train, y_train)
+        detector.optimize_threshold(X_val, y_val, beta=2.0)
+
+        half = len(y_val) // 2
+        info = detector.measure_operating_point(X_val[:half], y_val[:half])
+
+        assert info["tp"] + info["fp"] + info["tn"] + info["fn"] == half
+
+    def test_keeps_the_threshold_frozen(self, overlapping_data):
+        """Measuring is not selecting: nothing about the detector may move."""
+        X_train, y_train, X_val, y_val = overlapping_data
+        detector = _fitted_detector(X_train, y_train)
+        detector.optimize_threshold(X_val, y_val, beta=2.0)
+        before = detector.threshold
+
+        detector.measure_operating_point(X_train, y_train)
+
+        assert detector.threshold == before
+        assert detector.get_operating_point_info()["threshold"] == before
+
+    def test_defaults_to_the_beta_the_threshold_was_selected_with(self, overlapping_data):
+        X_train, y_train, X_val, y_val = overlapping_data
+        detector = _fitted_detector(X_train, y_train)
+        detector.optimize_threshold(X_val, y_val, beta=2.0)
+
+        info = detector.measure_operating_point(X_train, y_train)
+
+        assert info["beta"] == 2.0
+        assert "f2_score" in info
+
+    def test_requires_a_fitted_model(self, separable_data):
+        _, _, X_val, y_val = separable_data
+
+        with pytest.raises(RuntimeError, match="fit or loaded"):
+            FlowAnomalyDetector(IsolationForestConfig()).measure_operating_point(X_val, y_val)
+
+
 # ============================================================================
 # FlowAnomalyDetector — persistence
 # ============================================================================

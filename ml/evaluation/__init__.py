@@ -9,9 +9,10 @@ from package import time would break the production image (or bloat it by
 the branch that actually needs a figure.
 """
 
-from ml.evaluation.metrics import compare_models, compute_metrics
+from ml.evaluation.metrics import best_fbeta_threshold, compare_models, compute_metrics
 
 __all__ = [
+    "best_fbeta_threshold",
     "compare_models",
     "compute_metrics",
 ]

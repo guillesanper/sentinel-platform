@@ -24,8 +24,9 @@ import joblib
 import numpy as np
 import structlog
 from sklearn.ensemble import IsolationForest
-from sklearn.metrics import confusion_matrix, fbeta_score
+from sklearn.metrics import confusion_matrix
 
+from ml.evaluation.metrics import best_fbeta_threshold
 from ml.flow.config import IsolationForestConfig
 from ml.flow.labels import BENIGN_LABEL
 
@@ -39,11 +40,6 @@ logger = structlog.get_logger()
 MODEL_FILE: Final[str] = "isolation_forest.joblib"
 THRESHOLD_FILE: Final[str] = "if_threshold.npy"
 THRESHOLD_INFO_FILE: Final[str] = "if_threshold_info.json"
-
-# Number of candidate thresholds scanned by optimize_threshold. 300 over the
-# observed score range is finer than the resolution the metric can distinguish
-# on any realistic validation set.
-DEFAULT_THRESHOLD_CANDIDATES: Final[int] = 300
 
 
 class FlowAnomalyDetector:
@@ -128,16 +124,19 @@ class FlowAnomalyDetector:
         X_val: np.ndarray,
         y_val: np.ndarray,
         beta: float = 1.0,
-        n_candidates: int = DEFAULT_THRESHOLD_CANDIDATES,
+        n_candidates: int | None = None,
     ) -> float:
         """
         Pick the decision-function threshold maximising F-beta on ``X_val``.
 
-        Candidates are spread uniformly over the score range observed on the
-        validation set. The decision rule at threshold ``t`` is::
+        The decision rule at threshold ``t`` is::
 
             score(x) <  t  →  anomaly (positive class, 1)
             score(x) >= t  →  BENIGN  (negative class, 0)
+
+        Every operating point the validation set actually offers is evaluated,
+        so the threshold is the exact maximiser; see
+        :func:`ml.evaluation.metrics.best_fbeta_threshold`.
 
         Args:
             X_val: Validation feature matrix.
@@ -145,7 +144,8 @@ class FlowAnomalyDetector:
                 ``BENIGN`` counts as the positive class.
             beta: Recall weight relative to precision. ``beta > 1`` favours
                 recall, ``beta < 1`` favours precision.
-            n_candidates: Thresholds scanned over the score range.
+            n_candidates: Optional cap on the operating points evaluated. None
+                evaluates all of them.
 
         Returns:
             The selected threshold, also stored on the instance.
@@ -159,24 +159,13 @@ class FlowAnomalyDetector:
         scores = self._model.decision_function(X_val)
         y_binary = (y_val != BENIGN_LABEL).astype(int)
 
-        candidates = np.linspace(scores.min(), scores.max(), num=n_candidates)
-        best_fbeta = -1.0
-        best_t = float(candidates[len(candidates) // 2])
-
-        for t in candidates:
-            y_pred = (scores < t).astype(int)
-            # A threshold that flags nothing has undefined precision; skipping
-            # it keeps the degenerate all-negative point out of the search.
-            if y_pred.sum() == 0:
-                continue
-            fb = fbeta_score(y_binary, y_pred, beta=beta, zero_division=0)
-            if fb > best_fbeta:
-                best_fbeta = fb
-                best_t = float(t)
+        best_t, best_fbeta = best_fbeta_threshold(
+            scores, y_binary, beta=beta, n_candidates=n_candidates
+        )
 
         self._threshold = best_t
         y_pred_best = (scores < best_t).astype(int)
-        self._threshold_info = self._compute_operating_info(y_binary, y_pred_best, best_fbeta, beta)
+        self._threshold_info = self._compute_operating_info(y_binary, y_pred_best, beta)
 
         info = self._threshold_info
         logger.info(
@@ -190,6 +179,55 @@ class FlowAnomalyDetector:
             fnr=info["fnr"],
         )
         return best_t
+
+    def measure_operating_point(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        beta: float | None = None,
+    ) -> dict[str, Any]:
+        """
+        Measure the active threshold's operating point on an arbitrary set.
+
+        :meth:`optimize_threshold` reports the operating point of the set it
+        *selected* the threshold on, which is a fit statistic and not an estimate
+        of held-out performance. Two effects push it optimistic, and both were
+        measured on CICIDS2017: the threshold is the argmax of F-beta over every
+        operating point that set offers, and — under the temporal protocol —
+        validation is the middle slice of each block while test is the last, so
+        validation sits systematically closer in time to training.
+
+        On the reference run the gap is not a rounding detail: Stage 1 recall
+        reads 0.986 on validation and 0.804 on test, i.e. the share of attacks
+        the cascade can never recover goes from 1.4% to 19.6%. Since Stage 1's
+        recall is a hard ceiling for the whole cascade, that number has to come
+        from held-out data. Use this method for anything reported as a result.
+
+        Args:
+            X: Feature matrix to measure on.
+            y: Canonical string class labels; anything other than ``BENIGN``
+                counts as the positive class.
+            beta: Recall weight used for the reported ``f<beta>_score``. Defaults
+                to the beta the threshold was selected with, so the two operating
+                points stay comparable.
+
+        Returns:
+            Same shape as :meth:`get_operating_point_info`.
+
+        Raises:
+            RuntimeError: The model has not been fitted or loaded.
+        """
+        self._check_fitted()
+        assert self._model is not None
+
+        if beta is None:
+            beta = float(self._threshold_info.get("beta", 1.0))
+
+        scores = self._model.decision_function(X)
+        y_binary = (y != BENIGN_LABEL).astype(int)
+        y_pred = (scores < self._threshold).astype(int)
+
+        return self._compute_operating_info(y_binary, y_pred, beta)
 
     def predict_binary(self, X: np.ndarray) -> np.ndarray:
         """
@@ -247,7 +285,13 @@ class FlowAnomalyDetector:
 
     def get_operating_point_info(self) -> dict[str, Any]:
         """
-        Return the metrics measured at the active threshold.
+        Return the operating point **on the set the threshold was selected on**.
+
+        This is a record of the selection, not an estimate of held-out
+        performance: the threshold is the argmax of F-beta over the operating
+        points of this very set. Report it as "where the threshold came from",
+        and use :meth:`measure_operating_point` on test for anything published
+        as a result — on CICIDS2017 the two differ by 18 points of recall.
 
         Returns:
             Dictionary with ``threshold``, ``beta``, ``f<beta>_score``,
@@ -352,15 +396,27 @@ class FlowAnomalyDetector:
         self,
         y_true: np.ndarray,
         y_pred: np.ndarray,
-        fbeta: float,
         beta: float,
     ) -> dict[str, Any]:
-        """Derive the full confusion-matrix diagnostics at the chosen threshold."""
+        """
+        Derive the full confusion-matrix diagnostics at the active threshold.
+
+        F-beta is recomputed from the confusion matrix rather than carried in
+        from the threshold search. On the selection set the two agree exactly —
+        ``best_fbeta_threshold`` derives it from the same precision and recall —
+        and off it there is no search result to carry, which is precisely the
+        case :meth:`measure_operating_point` exists to cover.
+        """
         tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
         recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
         fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
         fnr = fn / (fn + tp) if (fn + tp) > 0 else 0.0
+
+        beta_sq = beta * beta
+        denominator = beta_sq * precision + recall
+        fbeta = (1.0 + beta_sq) * precision * recall / denominator if denominator > 0 else 0.0
+
         beta_str = f"{beta:.1f}".rstrip("0").rstrip(".")
         return {
             "threshold": self._threshold,

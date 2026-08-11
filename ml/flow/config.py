@@ -18,13 +18,32 @@ from pathlib import Path
 from typing import Any, Final
 
 # Dataset partitioning protocols.
-#   temporal    — 70/15/15 chronological cut inside each (capture_day, class)
-#                 block. Default: no future→past leakage, class coverage kept.
+#   temporal    — 70/15/15 chronological cut inside each temporal block.
+#                 Default: no future→past leakage, block coverage kept.
 #   random      — the TFA's stratified row-wise split. Retained only to
 #                 quantify the leakage by comparing against `temporal`.
 #   day-holdout — train on Mon-Thu, test on Fri. Honest generalisation to an
 #                 unseen day, but only for classes present on both sides.
 SPLIT_STRATEGIES: Final[tuple[str, ...]] = ("temporal", "random", "day-holdout")
+
+# What closes the (capture_day, …) tuple that defines a temporal block. Applies
+# to `temporal` and to the train/val cut of `day-holdout`; `random` ignores it.
+#
+#   sub-label — block by the raw CICIDS2017 label. Every attack tool is cut
+#               chronologically on its own, so all of them appear in train, val
+#               and test. Removes the near-duplicate leakage and nothing else.
+#   class     — block by the collapsed canonical label. Because ATTACK_GROUPS
+#               merges tools that ran *sequentially* within a day (Wednesday:
+#               Hulk → slowloris → Slowhttptest → GoldenEye, all `DoS`), this
+#               additionally holds entire tools out of training. That is a
+#               legitimate question — generalisation to an unseen tool — but it
+#               is a different one, and only the multi-tool classes are actually
+#               asked it, so its F1-macro averages incomparable quantities.
+#
+# Measured on CICIDS2017 (200k flows, xgb, no tuning): F1-macro 0.7721 with
+# `sub-label` against 0.2973 with `class`, both under the same chronological
+# guarantee. See docs/ml/PARTICION-TEMPORAL.md.
+TEMPORAL_BLOCKS: Final[tuple[str, ...]] = ("sub-label", "class")
 
 
 # ============================================================================
@@ -34,11 +53,22 @@ SPLIT_STRATEGIES: Final[tuple[str, ...]] = ("temporal", "random", "day-holdout")
 
 @dataclass
 class IsolationForestConfig:
-    """Default hyperparameters for the Stage 1 anomaly detector."""
+    """
+    Default hyperparameters for the Stage 1 anomaly detector.
+
+    Note on ``contamination``: the forest is fitted on **BENIGN rows only**, so
+    this is not "the expected attack rate in CICIDS2017" — it is the fraction of
+    *benign* traffic sklearn is told to treat as outlying. It only sets
+    ``offset_``, which shifts ``decision_function`` by a constant, and
+    :meth:`~ml.flow.models.isolation_forest.FlowAnomalyDetector.optimize_threshold`
+    then picks its own threshold on that shifted scale. The value is therefore
+    inert for every metric this track reports; changing it moves the raw scores
+    and the selected threshold by the same amount.
+    """
 
     n_estimators: int = 200
     max_samples: str = "auto"  # "auto" → min(256, n_samples)
-    contamination: float = 0.15  # expected anomaly fraction (~15% in CICIDS2017)
+    contamination: float = 0.15  # see the class docstring: absorbed by the threshold search
     max_features: float = 1.0
     bootstrap: bool = False
     n_jobs: int = -1
@@ -163,6 +193,7 @@ class FlowConfig:
 
     # --- Dataset partitioning ---
     split_strategy: str = "temporal"
+    temporal_block: str = "sub-label"
     train_ratio: float = 0.70
     val_ratio: float = 0.15
     test_ratio: float = 0.15
@@ -184,6 +215,7 @@ class FlowConfig:
         self.output_path = Path(self.output_path)
         _validate_ratios(self.train_ratio, self.val_ratio, self.test_ratio)
         _validate_split_strategy(self.split_strategy)
+        _validate_temporal_block(self.temporal_block)
 
     @property
     def eda_path(self) -> Path:
@@ -238,4 +270,12 @@ def _validate_split_strategy(strategy: str) -> None:
     if strategy not in SPLIT_STRATEGIES:
         raise ValueError(
             f"Unknown split_strategy {strategy!r}. Expected one of {list(SPLIT_STRATEGIES)}"
+        )
+
+
+def _validate_temporal_block(block: str) -> None:
+    """Raise when the temporal block key is not one of TEMPORAL_BLOCKS."""
+    if block not in TEMPORAL_BLOCKS:
+        raise ValueError(
+            f"Unknown temporal_block {block!r}. Expected one of {list(TEMPORAL_BLOCKS)}"
         )

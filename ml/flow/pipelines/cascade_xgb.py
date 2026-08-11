@@ -201,6 +201,14 @@ class CascadeXGBPipeline(BaseCascadePipeline):
             ``accuracy``, ``f1_macro`` and ``f1_weighted``, plus the Stage 1
             operating point (``if_precision``, ``if_recall``, ``if_fpr``,
             ``if_fnr``) when a threshold search has run.
+
+        Note:
+            The Stage 1 figures are measured **on ``X_test``**, not on the
+            validation set the threshold was chosen from. Reporting the
+            selection-set numbers next to test accuracy — which is what this
+            method used to do — overstated Stage 1 recall by 18 points on
+            CICIDS2017, and Stage 1 recall is the cascade's hard ceiling. See
+            :meth:`~ml.flow.models.isolation_forest.FlowAnomalyDetector.measure_operating_point`.
         """
         y_pred = self.predict(X_test)
 
@@ -211,11 +219,14 @@ class CascadeXGBPipeline(BaseCascadePipeline):
         }
 
         try:
-            op = self._if_model.get_operating_point_info()
+            # Only for the beta, and to establish that a threshold was in fact
+            # chosen — without a search the operating point means nothing.
+            selection = self._if_model.get_operating_point_info()
         except RuntimeError:
             # No threshold search ran; the end-to-end metrics stand on their own.
             pass
         else:
+            op = self._if_model.measure_operating_point(X_test, y_test, beta=selection["beta"])
             metrics["if_precision"] = op["precision"]
             metrics["if_recall"] = op["recall"]
             metrics["if_fpr"] = op["fpr"]

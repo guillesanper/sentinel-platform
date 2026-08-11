@@ -240,19 +240,31 @@ CICIDS_MINI_FEATURES: tuple[str, ...] = (
 # WebAttack class would vanish from the fixture without any test failing.
 CICIDS_MOJIBAKE_EN_DASH: str = "".join(chr(cp) for cp in (0xEF, 0xBF, 0xBD))
 
-# Filename → raw label written into the CSV. The names mimic the real
-# MachineLearningCVE distribution so that map_capture_day resolves them to a
-# real weekday.
-CICIDS_MINI_FILES: tuple[tuple[str, str], ...] = (
-    ("Tuesday-WorkingHours.pcap_ISCX.csv", "FTP-Patator"),
-    ("Wednesday-workingHours.pcap_ISCX.csv", "DoS Hulk"),
+# Filename → raw labels written into the CSV's attack window, **in order**. The
+# names mimic the real MachineLearningCVE distribution so that map_capture_day
+# resolves them to a real weekday.
+#
+# Tuesday and Wednesday carry two raw labels each, run one after the other, and
+# that is the single most important property of this fixture. Both pairs collapse
+# to one canonical class (FTP-Patator + SSH-Patator → BruteForce; DoS Hulk +
+# DoS GoldenEye → DoS), exactly as in the real captures — so a chronological cut
+# blocked on the canonical class holds the *second* tool entirely out of
+# training, while a cut blocked on the raw label keeps both on both sides. The
+# difference between those two protocols is worth 0.47 of F1-macro on the real
+# data; see docs/ml/PARTICION-TEMPORAL.md.
+CICIDS_MINI_FILES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Tuesday-WorkingHours.pcap_ISCX.csv", ("FTP-Patator", "SSH-Patator")),
+    ("Wednesday-workingHours.pcap_ISCX.csv", ("DoS Hulk", "DoS GoldenEye")),
     (
         "Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv",
-        f"Web Attack {CICIDS_MOJIBAKE_EN_DASH} XSS",
+        (f"Web Attack {CICIDS_MOJIBAKE_EN_DASH} XSS",),
     ),
-    ("Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv", "DDoS"),
-    ("Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv", "PortScan"),
+    ("Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv", ("DDoS",)),
+    ("Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv", ("PortScan",)),
 )
+
+# Canonical classes that the fixture builds from more than one attack tool.
+CICIDS_MINI_MULTI_TOOL_CLASSES: tuple[str, ...] = ("BruteForce", "DoS")
 
 # Rows per file: a benign lead-in, the attack window, and a benign tail. This is
 # the shape measured on the real captures (decile 0 benign, deciles 1-8 attack,
@@ -265,12 +277,18 @@ CICIDS_MINI_TAIL: int = 120
 
 def _write_cicids_mini_csv(
     path: Path,
-    raw_label: str,
+    raw_labels: tuple[str, ...],
     *,
     seed: int,
     inject_artifacts: bool,
 ) -> None:
-    """Write one synthetic CICIDS2017-shaped CSV with a temporal structure."""
+    """
+    Write one synthetic CICIDS2017-shaped CSV with a temporal structure.
+
+    The attack window is divided evenly among ``raw_labels`` and the parts are
+    laid down **in the given order**, so a file with two labels reproduces the
+    real "tool A, then tool B" sequence within a single capture day.
+    """
     rng = np.random.default_rng(seed)
 
     def block(n: int, label: str, centre: float) -> dict:
@@ -281,11 +299,14 @@ def _write_cicids_mini_csv(
             "Label": [label] * n,
         }
 
-    frames = [
-        pd.DataFrame(block(CICIDS_MINI_LEAD_IN, "BENIGN", 100.0)),
-        pd.DataFrame(block(CICIDS_MINI_ATTACK, raw_label, 500.0)),
-        pd.DataFrame(block(CICIDS_MINI_TAIL, "BENIGN", 100.0)),
-    ]
+    per_label = CICIDS_MINI_ATTACK // len(raw_labels)
+    frames = [pd.DataFrame(block(CICIDS_MINI_LEAD_IN, "BENIGN", 100.0))]
+    for i, raw_label in enumerate(raw_labels):
+        # Each tool gets its own feature centre: two tools of the same family are
+        # related but not identical, which is what makes holding one out a real
+        # generalisation demand rather than a relabelling.
+        frames.append(pd.DataFrame(block(per_label, raw_label, 500.0 + 60.0 * i)))
+    frames.append(pd.DataFrame(block(CICIDS_MINI_TAIL, "BENIGN", 100.0)))
     df = pd.concat(frames, ignore_index=True)
 
     if inject_artifacts:
@@ -312,15 +333,18 @@ def cicids_mini_csv(tmp_path: Path) -> Path:
 
     Each file holds one attack class surrounded by benign traffic, mirroring the
     real capture layout, so the temporal split has a meaningful notion of
-    "earlier" inside every ``(capture_day, class)`` block.
+    "earlier" inside every block. Two of the files run **two attack tools in
+    sequence** under a single canonical class — see
+    :data:`CICIDS_MINI_FILES` for why that detail carries the weight of the
+    temporal-blocking tests.
     """
     data_dir = tmp_path / "cicids-mini"
     data_dir.mkdir()
 
-    for seed, (filename, raw_label) in enumerate(CICIDS_MINI_FILES):
+    for seed, (filename, raw_labels) in enumerate(CICIDS_MINI_FILES):
         _write_cicids_mini_csv(
             data_dir / filename,
-            raw_label,
+            raw_labels,
             seed=1000 + seed,
             inject_artifacts=(seed == 0),
         )

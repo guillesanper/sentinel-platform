@@ -43,7 +43,7 @@ flujo (78 features CICFlowMeter)
            SÍ
             ▼
 ┌───────────────────────────────┐
-│ STAGE 2 — FlowAttackClassifier│   XGBoost multiclase sobre las 7 clases.
+│ STAGE 2 — FlowAttackClassifier│   XGBoost multiclase sobre las clases canónicas.
 │ ml/flow/models/               │   Devuelve una probabilidad por familia.
 │   xgboost_classifier.py       │
 └───────────┬───────────────────┘
@@ -58,9 +58,14 @@ flujo (78 features CICFlowMeter)
 ```
 
 **La consecuencia de la cascada es que el recall de Stage 1 es un techo duro.** Lo que Stage 1 deja
-pasar como benigno no tiene segunda oportunidad, por buena que sea la precisión de Stage 2. Con
-partición temporal ese techo es el 62,6 % — ver [README.md § Resultados](README.md#resultados).
-Por eso el umbral se optimiza con β=2 y no con F1.
+pasar como benigno no tiene segunda oportunidad, por buena que sea la precisión de Stage 2. Con el
+protocolo por defecto (`temporal` + `sub-label`) ese techo es el **80,4 % medido sobre test** — ver
+[README.md § Resultados](README.md#resultados). Por eso el umbral se optimiza con β=2 y no con F1.
+
+Ese «medido sobre test» es literal y costó un error: hasta el 8 de agosto de 2026 la cifra que se
+publicaba era la de validación (98,6 %), que es el conjunto donde la búsqueda F-beta *elige* el
+umbral. El techo real es 18 puntos más bajo. La medición y el porqué están en
+[PARTICION-TEMPORAL.md §10](PARTICION-TEMPORAL.md).
 
 Existe una segunda cascada, `CascadeMLPPipeline` (Stage 2 = red neuronal en NumPy pura: BatchNorm,
 Adam, focal loss, backprop a mano, 761 líneas). Se conserva por valor académico y **está fuera de
@@ -93,7 +98,7 @@ Dos propiedades del código que conviene no romper:
    mantener la monotonía.
 
 Cuando Stage 1 marca un flujo pero Stage 2 no sabe nombrarlo, `attack_type` es
-**`unknown_anomaly`** — que no es una de las 7 clases. Es la respuesta honesta, no un `BENIGN`
+**`unknown_anomaly`** — que no es una de las clases canónicas. Es la respuesta honesta, no un `BENIGN`
 por defecto.
 
 ---
@@ -109,9 +114,11 @@ por defecto.
 | `lateral_movement` | `DoS` |
 | `data_exfiltration` | `Scan` |
 | `reconnaissance` | `WebAttack` |
+| — | `Infiltration` |
 
-La tentación es evidente: `brute_force` ≈ `BruteForce`, ambas listas tienen 7 entradas. **Es una
-coincidencia y unificarlas sería un error de modelado.** Las clases de eventos describen la
+La tentación es evidente: `brute_force` ≈ `BruteForce`, y hasta que `Infiltration` pasó a ser clase
+propia ambas listas tenían 7 entradas. **Era una coincidencia y unificarlas sería un error de
+modelado.** Las clases de eventos describen la
 *intención* del actor sobre un log de autenticación; las de flujos describen el *patrón de tráfico*
 que produce una herramienta. `DDoS` y `DoS` no tienen equivalente en un log de auth;
 `privilege_escalation` no tiene firma de flujo. Los dos vectores de features son disjuntos (25
@@ -125,11 +132,24 @@ entrena sin lanzar una sola excepción y pasa cualquier smoke test que mire el e
 clases separados hacen que ese envenenamiento sea imposible por construcción. (Se añadió además un
 `logger.warning("unknown_label_mapped_to_normal", …)` para que deje rastro.)
 
-Las 15 etiquetas crudas de CICIDS2017 se colapsan a las 7 canónicas en
+Las 15 etiquetas crudas de CICIDS2017 se colapsan a las 8 canónicas en
 [`ml/flow/labels.py`](../../ml/flow/labels.py) vía `ATTACK_GROUPS` (`DoS Hulk`, `DoS GoldenEye`,
-`DoS slowloris`, `DoS Slowhttptest` y `Heartbleed` → `DoS`; `PortScan` e `Infiltration` → `Scan`;
+`DoS slowloris`, `DoS Slowhttptest` y `Heartbleed` → `DoS`; `PortScan` → `Scan`;
 `FTP-Patator` y `SSH-Patator` → `BruteForce`; `Bot` → `Botnet`; las tres `Web Attack …` →
-`WebAttack`).
+`WebAttack`; `Infiltration` → `Infiltration`).
+
+> **`Infiltration` no es `Scan`.** El TFA metía sus 36 flujos —un escenario de compromiso de host y
+> exfiltración— dentro de los ~90.000 de barrido de puertos. Además **eludía el filtro de
+> minoritarias**: `filter_minority_classes` corre *después* del colapso, así que
+> `min_class_samples=100` nunca veía esas 36 filas. Con clase propia, el filtro la descarta solo y
+> lo deja en el log (`minority_class_removed`). El efecto en métricas es despreciable; el efecto en
+> corrección es que desaparece un bloque `thursday/Scan` que aportaba un test garantizado a 0.
+
+> **El colapso es información que la partición necesita.** `ATTACK_GROUPS` junta herramientas que
+> corrieron **en serie** dentro del mismo día, así que un corte cronológico sobre la clase colapsada
+> holdea herramientas enteras. Por eso el loader conserva la etiqueta cruda en `raw_label` y la
+> clave del bloque es configurable (`--temporal-block`). Cuesta 0.475 de F1-macro confundir las dos
+> cosas: [PARTICION-TEMPORAL.md](PARTICION-TEMPORAL.md).
 
 > **Trampa de encoding.** Las tres etiquetas `Web Attack` del CSV crudo contienen un **EN DASH**
 > (U+2013) que llega mojibakeado como `ï¿½` por una lectura latin-1 previa. `map_label()` repara
@@ -231,25 +251,43 @@ recientes a test.
 Implementación en [`ml/flow/loader.py`](../../ml/flow/loader.py):
 
 - `load_cicids2017()` añade **`capture_day`** (del nombre de fichero, vía el mapa explícito
-  `CAPTURE_DAYS`) y **`order_idx`**. Ambas sobreviven a `clean_dataset`,
-  `filter_minority_classes` y `stratified_sample`.
+  `CAPTURE_DAYS`), **`order_idx`** y **`raw_label`** (la etiqueta tal como venía en el CSV, antes
+  del colapso canónico). Las tres sobreviven a `clean_dataset`, `filter_minority_classes` y
+  `stratified_sample`, y las tres están en `META_COLUMNS`, que es lo único que las mantiene fuera
+  de `get_feature_columns()`.
 - `split_dataset_temporal()` es el **default**. `split_dataset()` (aleatoria) se conserva para
   poder **cuantificar la fuga**, que es un resultado en sí mismo.
   `split_dataset_day_holdout()` implementa el protocolo secundario, que loguea explícitamente qué
   clases quedan fuera del train; se reporta aparte, nunca como métrica principal.
 
-Cuatro detalles del comportamiento que sorprenden si no se conocen:
+Cinco detalles del comportamiento que sorprenden si no se conocen:
 
 1. **`order_idx` es un contador global**, no una posición por fichero.
 2. **Los splits temporales barajan cada parte.** La garantía cronológica la llevan los **valores**
    de `order_idx`, no el orden de las filas en el DataFrame resultante.
 3. **Los bloques con menos de 3 filas van enteros a train**, con warning
    `temporal_block_not_splittable`.
-4. **`clean_dataset` deduplica sobre `features + Label`**, nunca sobre todas las columnas — si
-   incluyera `order_idx`, no habría duplicado posible.
+4. **`clean_dataset` deduplica sobre `features + Label + raw_label`**, nunca sobre todas las
+   columnas — si incluyera `order_idx`, no habría duplicado posible. `raw_label` entra porque dos
+   flujos idénticos en features pero producidos por herramientas distintas no son el mismo flujo.
+5. **Qué define un bloque es configurable y no es un detalle**: `--temporal-block sub-label`
+   (default) bloquea por `(capture_day, raw_label)` y `class` por `(capture_day, Label)`. Un frame
+   armado a mano sin `raw_label` cae al bloqueo por clase con warning
+   `temporal_block_fallback_to_class`.
 
 El resultado de aplicar esto está en [README.md § Resultados](README.md#resultados): F1-macro cae de
-0.9166 a 0.2809. **Esa caída es el entregable, no un fallo.**
+0.9197 a 0.7721 con el protocolo por defecto, y a 0.2973 si además se holdean herramientas de
+ataque. **El entregable no es la caída, es la descomposición**: 0.148 de fuga por casi-duplicados y
+0.475 de artefacto de taxonomía × tiempo. Cómo se separaron, y por qué la primera versión de este
+documento atribuía el 100 % a la fuga, está en
+[PARTICION-TEMPORAL.md](PARTICION-TEMPORAL.md).
+
+> **Característica conocida: el enrutado in-sample de Stage 1.** El entrenamiento hace
+> `fit(X_train[benign])` y a continuación `predict_binary(X_train)`, así que las filas benignas se
+> puntúan **en muestra** y Stage 2 se entrena sobre una población de falsos positivos algo más
+> limpia que la que verá en producción. Se documenta y **no se arregla**: con `max_samples="auto"`
+> (= min(256, n)) cada árbol ve 256 filas de ~140.000, el efecto es despreciable, y el arreglo
+> honesto —enrutado out-of-fold— añade complejidad real a la ruta de entrenamiento.
 
 ---
 
@@ -266,6 +304,7 @@ python -m ml.training.train_cicids --data-dir api/csvs --pipeline xgb
 | `--sample-size INT` | `1000000` | Muestreo estratificado; `0` usa el dataset completo. **No gobierna la memoria** (ver aviso abajo). |
 | `--pipeline [xgb\|mlp\|both]` | `xgb` | `both` añade la comparación cruzada. |
 | `--split [temporal\|random\|day-holdout]` | `temporal` | `random` es el split con fuga del TFA, conservado para cuantificarla. |
+| `--temporal-block [sub-label\|class]` | `sub-label` | Qué define un bloque temporal. `sub-label` aísla la fuga por casi-duplicados; `class` además holdea herramientas de ataque no vistas. Ignorada por `--split random`. Ver [PARTICION-TEMPORAL.md](PARTICION-TEMPORAL.md). |
 | `--test-days TEXT` | `friday` | Repetible. **Solo aplica con `day-holdout`**; ignorada en el resto. |
 | `--beta FLOAT` | `2.0` | Peso F-beta del umbral de Stage 1. `>1` penaliza los ataques no detectados. |
 | `--skip-tuning / --tune` | `--tune` | `--tune` lanza una `RandomizedSearchCV` 20×3 en Stage 2. Los smokes deben usar `--skip-tuning`. |

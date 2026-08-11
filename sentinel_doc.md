@@ -797,8 +797,8 @@ la red y por eso no es la que decide.
 > Ambas cifras son **cotas optimistas**: proceden del protocolo con split aleatorio, que filtra
 > casi-duplicados de la misma ráfaga entre train y test. Eso **no invalida la comparación** —
 > ambos modelos pagan el mismo sesgo sobre el mismo split—, pero ninguno de los dos números estima
-> el rendimiento sobre tráfico no visto. Con partición temporal, XGBoost cae a 0.2809 de F1-macro.
-> Detalle completo en [docs/ml/README.md](./docs/ml/README.md#resultados).
+> el rendimiento sobre tráfico no visto. Con partición temporal sin fuga, XGBoost cae a 0.7721 de
+> F1-macro. Detalle completo en [docs/ml/README.md](./docs/ml/README.md#resultados).
 
 A la evidencia se suman las razones operativas, que no cambian:
 - Security requires explainability (XGBoost da importancia de features directamente)
@@ -1086,15 +1086,24 @@ y clases separados lo hacen imposible por construcción.
 
 El TFA de origen usaba un `train_test_split` estratificado **por fila** sobre una captura continua,
 lo que filtra casi-duplicados de la misma ráfaga entre train y test. El track de sentinel corta
-**70/15/15 cronológicamente dentro de cada bloque `(día de captura, clase)`** (`--split temporal`,
-el default). El impacto medido, mismo comando salvo el `--split`:
+**70/15/15 cronológicamente dentro de cada bloque `(día de captura, herramienta de ataque)`**
+(`--split temporal`, el default). El impacto medido, mismo comando salvo el protocolo:
 
 | Split | Accuracy | F1-macro | F1-weighted |
 |---|---|---|---|
-| `random` (protocolo del TFA) | 0.9934 | **0.9166** | 0.9935 |
-| `temporal` (default) | 0.8783 | **0.2809** | 0.8439 |
+| `random` (protocolo del TFA) | 0.9944 | **0.9197** | 0.9945 |
+| `temporal` + `--temporal-block sub-label` (default) | 0.9612 | **0.7721** | 0.9597 |
+| `temporal` + `--temporal-block class` | 0.8807 | **0.2973** | 0.8483 |
 
-**Esa caída no es una regresión: es la magnitud de la fuga que el protocolo anterior ocultaba.**
+Las tres filas comparten dataset y garantía cronológica; entre las dos últimas solo cambia qué
+define un bloque. Eso permite **descomponer** la caída en lugar de atribuirla entera a una causa:
+**0.148 de F1-macro es fuga por casi-duplicados (24 %) y 0.475 es un artefacto de taxonomía ×
+tiempo (76 %)** — `ATTACK_GROUPS` colapsa herramientas de ataque que corrieron en serie dentro del
+día, así que bloquear por clase canónica holdea herramientas enteras sin decirlo.
+
+Una versión anterior de este documento presentaba la caída a 0.2809 como «la magnitud de la fuga».
+Se equivocaba por un factor de ~4. El registro del error y su arreglo:
+[docs/ml/PARTICION-TEMPORAL.md](./docs/ml/PARTICION-TEMPORAL.md).
 
 ### Contrato de features
 

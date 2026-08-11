@@ -12,7 +12,9 @@ import joblib
 import numpy as np
 import structlog
 from sklearn.ensemble import IsolationForest
-from sklearn.metrics import confusion_matrix, fbeta_score
+from sklearn.metrics import confusion_matrix
+
+from ml.evaluation.metrics import best_fbeta_threshold
 
 logger = structlog.get_logger()
 
@@ -22,11 +24,6 @@ DEFAULT_MODEL_PATH = Path("models/anomaly_detector.joblib")
 # Artifact format written by save(). 1.1.0 adds "threshold_info"; load() still
 # accepts 1.0.0 files, which simply carry no operating point.
 ARTIFACT_VERSION: Final[str] = "1.1.0"
-
-# Number of candidate thresholds scanned by optimize_threshold_fbeta. 300 over
-# the observed score range is finer than the resolution the metric can
-# distinguish on any realistic validation set.
-DEFAULT_THRESHOLD_CANDIDATES: Final[int] = 300
 
 # Label of the negative class when y_val arrives as strings rather than 0/1.
 NORMAL_LABEL: Final[str] = "normal"
@@ -393,7 +390,7 @@ class AnomalyDetector:
         X_val: np.ndarray,
         y_val: np.ndarray,
         beta: float = 2.0,
-        n_candidates: int = DEFAULT_THRESHOLD_CANDIDATES,
+        n_candidates: int | None = None,
     ) -> float:
         """
         Pick the decision-function threshold maximising F-beta on ``X_val``.
@@ -405,9 +402,10 @@ class AnomalyDetector:
         * ``beta > 1`` penalises false negatives — fewer missed attacks.
         * ``beta < 1`` penalises false positives — fewer benign alarms.
 
-        Candidates are spread uniformly over the score range observed on the
-        validation set. The decision rule at threshold ``t`` is the same one
-        :meth:`predict` applies::
+        Every operating point the validation set actually offers is evaluated,
+        so the threshold is the exact maximiser; see
+        :func:`ml.evaluation.metrics.best_fbeta_threshold`. The decision rule at
+        threshold ``t`` is the same one :meth:`predict` applies::
 
             score(x) <  t  →  anomaly (positive class, 1)
             score(x) >= t  →  normal  (negative class, 0)
@@ -421,7 +419,8 @@ class AnomalyDetector:
                 positive class. The flow track's detector only ever sees the
                 latter; here both occur, so both are supported.
             beta: Recall weight relative to precision.
-            n_candidates: Thresholds scanned over the score range.
+            n_candidates: Optional cap on the operating points evaluated. None
+                evaluates all of them.
 
         Returns:
             The selected threshold, also stored on the instance.
@@ -437,20 +436,9 @@ class AnomalyDetector:
         scores = self._model.decision_function(X_val)
         y_binary = _binarize_labels(y_val)
 
-        candidates = np.linspace(scores.min(), scores.max(), num=n_candidates)
-        best_fbeta = -1.0
-        best_t = float(candidates[len(candidates) // 2])
-
-        for t in candidates:
-            y_pred = (scores < t).astype(int)
-            # A threshold that flags nothing has undefined precision; skipping
-            # it keeps the degenerate all-negative point out of the search.
-            if y_pred.sum() == 0:
-                continue
-            fb = fbeta_score(y_binary, y_pred, beta=beta, zero_division=0)
-            if fb > best_fbeta:
-                best_fbeta = fb
-                best_t = float(t)
+        best_t, best_fbeta = best_fbeta_threshold(
+            scores, y_binary, beta=beta, n_candidates=n_candidates
+        )
 
         self._threshold = best_t
         y_pred_best = (scores < best_t).astype(int)
