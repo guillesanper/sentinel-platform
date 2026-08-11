@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-01-28T02:54:07.134137Z",
+  "timestamp": "2026-08-11T11:47:17.342665Z",
   "data": {
     "source": "synthetic",
     "n_samples": 666,
@@ -8,22 +8,41 @@
     "test_size": 134
   },
   "parameters": {
-    "contamination": 0.3,
+    "contamination": 0.2,
     "n_estimators": 100,
     "max_depth": 6,
     "learning_rate": 0.1,
     "seed": 42
   },
+  "threshold": {
+    "strategy": "fbeta",
+    "value": -0.014134595025130701,
+    "target_recall": null,
+    "beta": 2.0,
+    "operating_point": {
+      "threshold": -0.014134595025130701,
+      "beta": 2.0,
+      "f2_score": 0.892857,
+      "precision": 0.833333,
+      "recall": 0.909091,
+      "fpr": 0.046512,
+      "fnr": 0.090909,
+      "tp": 10,
+      "fp": 2,
+      "tn": 41,
+      "fn": 1
+    }
+  },
   "metrics": {
     "anomaly": {
-      "accuracy": 0.5522388059701493,
-      "precision": 0.3979591836734694,
-      "recall": 0.975,
-      "f1": 0.5652173913043478
+      "accuracy": 0.9253731343283582,
+      "precision": 0.9047619047619048,
+      "recall": 0.7037037037037037,
+      "f1": 0.7916666666666666
     },
     "classifier": {
       "accuracy": 0.9925373134328358,
-      "precision": 0.9936034115138592,
+      "precision": 0.9940298507462686,
       "recall": 0.9925373134328358,
       "f1": 0.9925373134328358,
       "classification_report": {
@@ -31,53 +50,53 @@
           "precision": 1.0,
           "recall": 1.0,
           "f1-score": 1.0,
-          "support": 94.0
+          "support": 107.0
         },
         "brute_force": {
           "precision": 1.0,
           "recall": 1.0,
           "f1-score": 1.0,
-          "support": 7.0
+          "support": 5.0
         },
         "credential_stuffing": {
-          "precision": 0.8571428571428571,
+          "precision": 1.0,
           "recall": 1.0,
-          "f1-score": 0.9230769230769231,
-          "support": 6.0
+          "f1-score": 1.0,
+          "support": 4.0
         },
         "privilege_escalation": {
-          "precision": 1.0,
-          "recall": 0.8571428571428571,
-          "f1-score": 0.9230769230769231,
-          "support": 7.0
+          "precision": 0.8,
+          "recall": 1.0,
+          "f1-score": 0.8888888888888888,
+          "support": 4.0
         },
         "lateral_movement": {
           "precision": 1.0,
           "recall": 1.0,
           "f1-score": 1.0,
-          "support": 7.0
+          "support": 5.0
         },
         "data_exfiltration": {
           "precision": 1.0,
           "recall": 1.0,
           "f1-score": 1.0,
-          "support": 6.0
+          "support": 4.0
         },
         "reconnaissance": {
           "precision": 1.0,
-          "recall": 1.0,
-          "f1-score": 1.0,
-          "support": 7.0
+          "recall": 0.8,
+          "f1-score": 0.8888888888888888,
+          "support": 5.0
         },
         "accuracy": 0.9925373134328358,
         "macro avg": {
-          "precision": 0.979591836734694,
-          "recall": 0.979591836734694,
-          "f1-score": 0.9780219780219781,
+          "precision": 0.9714285714285714,
+          "recall": 0.9714285714285714,
+          "f1-score": 0.9682539682539684,
           "support": 134.0
         },
         "weighted avg": {
-          "precision": 0.9936034115138592,
+          "precision": 0.9940298507462686,
           "recall": 0.9925373134328358,
           "f1-score": 0.9925373134328358,
           "support": 134.0
@@ -85,7 +104,7 @@
       },
       "confusion_matrix": [
         [
-          94,
+          107,
           0,
           0,
           0,
@@ -95,7 +114,7 @@
         ],
         [
           0,
-          7,
+          5,
           0,
           0,
           0,
@@ -105,47 +124,47 @@
         [
           0,
           0,
-          6,
+          4,
           0,
           0,
           0,
           0
         ],
         [
+          0,
+          0,
+          0,
+          4,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          5,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          4,
+          0
+        ],
+        [
+          0,
           0,
           0,
           1,
-          6,
           0,
           0,
-          0
-        ],
-        [
-          0,
-          0,
-          0,
-          0,
-          7,
-          0,
-          0
-        ],
-        [
-          0,
-          0,
-          0,
-          0,
-          0,
-          6,
-          0
-        ],
-        [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          7
+          4
         ]
       ]
     },
@@ -154,43 +173,43 @@
         "precision": 1.0,
         "recall": 1.0,
         "f1": 1.0,
-        "support": 94.0
+        "support": 107.0
       },
       "brute_force": {
         "precision": 1.0,
         "recall": 1.0,
         "f1": 1.0,
-        "support": 7.0
+        "support": 5.0
       },
       "credential_stuffing": {
-        "precision": 0.8571428571428571,
+        "precision": 1.0,
         "recall": 1.0,
-        "f1": 0.9230769230769231,
-        "support": 6.0
+        "f1": 1.0,
+        "support": 4.0
       },
       "privilege_escalation": {
-        "precision": 1.0,
-        "recall": 0.8571428571428571,
-        "f1": 0.9230769230769231,
-        "support": 7.0
+        "precision": 0.8,
+        "recall": 1.0,
+        "f1": 0.8888888888888888,
+        "support": 4.0
       },
       "lateral_movement": {
         "precision": 1.0,
         "recall": 1.0,
         "f1": 1.0,
-        "support": 7.0
+        "support": 5.0
       },
       "data_exfiltration": {
         "precision": 1.0,
         "recall": 1.0,
         "f1": 1.0,
-        "support": 6.0
+        "support": 4.0
       },
       "reconnaissance": {
         "precision": 1.0,
-        "recall": 1.0,
-        "f1": 1.0,
-        "support": 7.0
+        "recall": 0.8,
+        "f1": 0.8888888888888888,
+        "support": 5.0
       }
     }
   },
