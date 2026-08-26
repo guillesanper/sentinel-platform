@@ -26,6 +26,7 @@ import structlog
 from sklearn.metrics import accuracy_score, f1_score
 
 from ml.flow.config import FlowConfig
+from ml.flow.cv import TemporalIndex
 from ml.flow.labels import BENIGN_LABEL
 from ml.flow.models.isolation_forest import FlowAnomalyDetector
 from ml.flow.models.xgboost_classifier import FlowAttackClassifier
@@ -98,6 +99,7 @@ class CascadeXGBPipeline(BaseCascadePipeline):
         beta: float = 1.0,
         skip_tuning: bool = False,
         feature_names: list[str] | None = None,
+        train_index: TemporalIndex | None = None,
     ) -> "CascadeXGBPipeline":
         """
         Train Stage 1 and Stage 2 in sequence.
@@ -111,6 +113,10 @@ class CascadeXGBPipeline(BaseCascadePipeline):
             skip_tuning: Skip the ``RandomizedSearchCV`` pass on Stage 2.
             feature_names: Column order of ``X_train``; overrides whatever was
                 given to the constructor.
+            train_index: Chronological index over the rows of ``X_train``. Only
+                the Stage 2 search reads it, and only when ``skip_tuning`` is
+                False; it is narrowed here by the Stage 1 anomaly mask, since
+                what reaches Stage 2 is the routed subset.
 
         Returns:
             self
@@ -130,6 +136,11 @@ class CascadeXGBPipeline(BaseCascadePipeline):
         anomaly_train = self._if_model.predict_binary(X_train).astype(bool)
         X_attack_train = X_train[anomaly_train]
         y_attack_train = y_train[anomaly_train]
+        # Deliberately on the same three lines as the matrix it describes. An
+        # index narrowed by any other mask still has a plausible length, still
+        # produces plausible folds, and yields hyperparameters chosen from
+        # nonsense — with no exception anywhere in the run.
+        attack_train_index = train_index.mask(anomaly_train) if train_index is not None else None
 
         anomaly_val = self._if_model.predict_binary(X_val).astype(bool)
         X_attack_val = X_val[anomaly_val]
@@ -154,7 +165,12 @@ class CascadeXGBPipeline(BaseCascadePipeline):
 
         logger.info("cascade_stage2_training", pipeline=self.name, stage2="xgboost")
         if not skip_tuning:
-            self._xgb.tune_hyperparameters(X_attack_train, y_attack_train)
+            self._report_fold_protocol(attack_train_index)
+            self._xgb.tune_hyperparameters(
+                X_attack_train,
+                y_attack_train,
+                train_index=attack_train_index,
+            )
 
         if X_attack_val.shape[0] == 0:
             logger.warning(
@@ -189,13 +205,25 @@ class CascadeXGBPipeline(BaseCascadePipeline):
         labels: np.ndarray = predictions.astype(str)
         return labels
 
-    def evaluate(self, X_test: np.ndarray, y_test: np.ndarray) -> dict[str, float]:
+    def evaluate(
+        self,
+        X_test: np.ndarray,
+        y_test: np.ndarray,
+        *,
+        labels: list[str] | None = None,
+    ) -> dict[str, float]:
         """
         Score the cascade end to end.
 
         Args:
             X_test: Test feature matrix.
             y_test: Ground-truth canonical string labels.
+            labels: Canonical class list the F1 scores average over. Without it
+                sklearn averages over the union of ``y_test`` and ``y_pred``, so
+                a class with no test support vanishes from the macro instead of
+                scoring 0.0 — the same headline computed two different ways
+                depending on the caller. See
+                :meth:`BaseCascadePipeline.evaluate`.
 
         Returns:
             ``accuracy``, ``f1_macro`` and ``f1_weighted``, plus the Stage 1
@@ -214,8 +242,12 @@ class CascadeXGBPipeline(BaseCascadePipeline):
 
         metrics: dict[str, float] = {
             "accuracy": float(accuracy_score(y_test, y_pred)),
-            "f1_macro": float(f1_score(y_test, y_pred, average="macro", zero_division=0)),
-            "f1_weighted": float(f1_score(y_test, y_pred, average="weighted", zero_division=0)),
+            "f1_macro": float(
+                f1_score(y_test, y_pred, average="macro", labels=labels, zero_division=0)
+            ),
+            "f1_weighted": float(
+                f1_score(y_test, y_pred, average="weighted", labels=labels, zero_division=0)
+            ),
         }
 
         try:
@@ -326,6 +358,44 @@ class CascadeXGBPipeline(BaseCascadePipeline):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _report_fold_protocol(self, train_index: TemporalIndex | None) -> None:
+        """
+        Say, once per run, what the Stage 2 search is about to cut its folds on.
+
+        Only the cascade knows both facts at once: whether an index arrived, and
+        which partitioning protocol the run declared. So the two cases are
+        separated here rather than inside the classifier, which sees only
+        ``None``:
+
+        * A temporal protocol without an index is a **warning**. The run claims
+          a chronological partition and its hyperparameter search silently is
+          not one.
+        * ``--split random`` without an index is expected and logged at info.
+          There is no temporal claim to violate, and a warning would be noise
+          that trains people to ignore the other one.
+        """
+        if train_index is not None:
+            return
+
+        if self._config.split_strategy == "random":
+            logger.info(
+                "xgb_tuning_folds_random_by_protocol",
+                pipeline=self.name,
+                hint="random split makes no chronological claim; shuffled folds match it",
+            )
+            return
+
+        logger.warning(
+            "xgb_tuning_temporal_folds_unavailable",
+            pipeline=self.name,
+            split_strategy=self._config.split_strategy,
+            hint=(
+                "no train_index reached train(); Stage 2 tunes on shuffled folds, which "
+                "can bias which hyperparameters win. Pass "
+                "train_index=build_temporal_index(train_df, config)"
+            ),
+        )
 
     def _check_feature_names(self, X: np.ndarray) -> None:
         """

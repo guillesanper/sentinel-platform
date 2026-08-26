@@ -82,17 +82,26 @@ Clase principal que encapsula el ciclo de vida completo del clasificador de Stag
 
 ---
 
-### `tune_hyperparameters(X_train, y_train) -> dict`
+### `tune_hyperparameters(X_train, y_train, *, train_index=None) -> dict`
 
-**Descripción:** Ejecuta `RandomizedSearchCV` con `StratifiedKFold` sobre el espacio de búsqueda definido en `config.search_space`. El `LabelEncoder` interno se inicializa en esta llamada si aún no ha sido ajustado.
+**Descripción:** Ejecuta `RandomizedSearchCV` sobre el espacio de búsqueda definido en `config.search_space`. El `LabelEncoder` interno se inicializa en esta llamada si aún no ha sido ajustado.
 
 **Parámetros:**
 - `X_train : np.ndarray` — matriz de características de los ejemplos de entrenamiento anómalos, shape `(n_samples, n_features)`
 - `y_train : np.ndarray` — etiquetas de tipo de ataque en formato string, shape `(n_samples,)`
+- `train_index : TemporalIndex | None` — posición cronológica (`order_idx`) y bloque temporal de cada fila de `X_train`, construido con `ml.flow.loader.build_temporal_index` y **restringido con la misma máscara de anomalía** que produjo `X_train`
 
 **Retorna:** `dict` — mapa de hiperparámetros a sus valores óptimos encontrados
 
-**Notas:** No aplica *early stopping* en el proceso de búsqueda; éste se aplica exclusivamente en la llamada posterior a `fit`. Si esta función no es llamada, `fit` utiliza los valores por defecto de `config`.
+**Particionado del CV:** con `train_index`, los folds son cronológicos **dentro de cada bloque `(capture_day, raw_label)`** y de ventana expansiva: con `cv_folds=K` cada bloque se corta en `K+1` trozos y el fold *k* entrena en los trozos `0..k-1` y valida en el *k* (ver `ml/flow/cv.py`). Sin él —o si los folds degeneran, p. ej. bloques demasiado pequeños para cortarse, o un fold cuyo train tendría una sola clase— se recurre a `StratifiedKFold(shuffle=True)`, dejando constancia en el log (`xgb_tuning_temporal_folds_degenerate`). Un `train_index` cuya longitud no coincida con `X_train` **lanza `ValueError`**: es un error de programación, no una condición de los datos.
+
+**Scorer:** `make_scorer(f1_score, average="macro", labels=np.arange(n_classes), zero_division=0)`, no la cadena `"f1_macro"`. Ésta promedia sobre `union(y_true, y_pred)` *del fold*, de modo que con folds cronológicos —donde que una clase falte en un trozo de validación es rutinario— el conjunto promediado varía por fold y por candidato y los scores de la búsqueda dejan de ser comparables. Es el mismo defecto que el `f1_macro` titular calculado sin `labels=`, un nivel más abajo.
+
+**Notas:** No aplica *early stopping* en el proceso de búsqueda; éste se aplica exclusivamente en la llamada posterior a `fit`. Si esta función no es llamada, `fit` utiliza los valores por defecto de `config`. Los `sample_weight` se calculan una sola vez sobre todo el conjunto y sklearn los trocea por fold: el peso es propiedad de la clase, no del fold.
+
+**Medido** sobre los CSV reales (`--tune --sample-size 200000`, protocolo por defecto, 22 de agosto de 2026): la entrada de la búsqueda son las **67.789 anomalías** que Stage 1 enruta, y los tres folds quedan en `train_sizes=[16943, 33893, 50836]` / `val_sizes=[16950, 16943, 16953]` con las **siete clases en las dos mitades de los tres folds** — ningún fold descartado y ningún fallback. `best_params={'subsample': 1.0, 'n_estimators': 300, 'max_depth': 6, 'learning_rate': 0.2, 'colsample_bytree': 0.8}` con `f1_macro=0.8316` en CV; sobre test, el run pasa de 0.6467 a 0.6584 de F1-macro. Reloj de pared del run completo: 602 s contra 86 s con `--skip-tuning`.
+
+**Eventos de log del fallback:** los emite el pipeline, no este módulo — `xgb_tuning_folds_random_by_protocol` (INFO) cuando el run es `--split random` y no hay afirmación temporal que hacer, y `xgb_tuning_temporal_folds_unavailable` (WARNING) cuando el protocolo es temporal pero no llegó índice. Los folds efectivos se registran aquí, en `xgb_tuning_temporal_folds`.
 
 ---
 

@@ -17,9 +17,11 @@ Two consequences of the MLP's API shape are worth knowing:
 * ``NeuralNetwork`` needs ``n_features`` and ``n_classes`` at construction, and
   neither is known until Stage 1 has routed. The network is therefore built
   inside :meth:`train`, not in ``__init__``.
-* ``skip_tuning`` is accepted for interface compatibility and does nothing:
-  there is no hyperparameter search for this network. Its search space is the
-  fixed architecture plus the defaults in ``NeuralNetworkConfig``.
+* ``skip_tuning`` and ``train_index`` are accepted for interface compatibility
+  and do nothing: there is no hyperparameter search for this network, so there
+  are neither folds to skip nor folds for a chronological index to shape. Its
+  search space is the fixed architecture plus the defaults in
+  ``NeuralNetworkConfig``.
 """
 
 from pathlib import Path
@@ -29,6 +31,7 @@ import structlog
 from sklearn.metrics import accuracy_score, f1_score
 
 from ml.flow.config import FlowConfig
+from ml.flow.cv import TemporalIndex
 from ml.flow.labels import BENIGN_LABEL, CLASS_ORDER
 from ml.flow.models.isolation_forest import FlowAnomalyDetector
 from ml.flow.models.neural_network import NeuralNetwork
@@ -91,6 +94,7 @@ class CascadeMLPPipeline(BaseCascadePipeline):
         beta: float = 1.0,
         skip_tuning: bool = False,
         feature_names: list[str] | None = None,
+        train_index: TemporalIndex | None = None,
     ) -> "CascadeMLPPipeline":
         """
         Train Stage 1 and Stage 2 in sequence.
@@ -103,6 +107,9 @@ class CascadeMLPPipeline(BaseCascadePipeline):
             beta: F-beta weight for the Stage 1 threshold search.
             skip_tuning: Accepted for interface compatibility; no effect.
             feature_names: Column order of ``X_train``.
+            train_index: Accepted for interface compatibility; no effect. The
+                MLP has no cross-validated hyperparameter search, so there are
+                no folds for a chronological index to shape.
 
         Returns:
             self
@@ -112,6 +119,8 @@ class CascadeMLPPipeline(BaseCascadePipeline):
         """
         if skip_tuning:
             logger.info("cascade_skip_tuning_ignored", pipeline=self.name)
+        if train_index is not None:
+            logger.info("cascade_train_index_ignored", pipeline=self.name)
         if feature_names is not None:
             self._feature_names = list(feature_names)
 
@@ -207,13 +216,24 @@ class CascadeMLPPipeline(BaseCascadePipeline):
         labels: np.ndarray = predictions.astype(str)
         return labels
 
-    def evaluate(self, X_test: np.ndarray, y_test: np.ndarray) -> dict[str, float]:
+    def evaluate(
+        self,
+        X_test: np.ndarray,
+        y_test: np.ndarray,
+        *,
+        labels: list[str] | None = None,
+    ) -> dict[str, float]:
         """
         Score the cascade end to end.
 
         Args:
             X_test: Test feature matrix.
             y_test: Ground-truth canonical string labels.
+            labels: Canonical class list the F1 scores average over — see
+                :meth:`BaseCascadePipeline.evaluate`. It matters more here than
+                for the XGBoost cascade: this Stage 2 is measurably weaker, so
+                a class it never predicts and the test set barely carries is
+                exactly the one an unconstrained macro would quietly drop.
 
         Returns:
             ``accuracy``, ``f1_macro``, ``f1_weighted`` and the Stage 1
@@ -228,8 +248,12 @@ class CascadeMLPPipeline(BaseCascadePipeline):
 
         metrics: dict[str, float] = {
             "accuracy": float(accuracy_score(y_test, y_pred)),
-            "f1_macro": float(f1_score(y_test, y_pred, average="macro", zero_division=0)),
-            "f1_weighted": float(f1_score(y_test, y_pred, average="weighted", zero_division=0)),
+            "f1_macro": float(
+                f1_score(y_test, y_pred, average="macro", labels=labels, zero_division=0)
+            ),
+            "f1_weighted": float(
+                f1_score(y_test, y_pred, average="weighted", labels=labels, zero_division=0)
+            ),
         }
 
         try:

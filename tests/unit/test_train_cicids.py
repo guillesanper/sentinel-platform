@@ -32,14 +32,17 @@ from ml.flow.features import FLOW_FEATURE_NAMES
 from ml.flow.labels import CLASS_ORDER
 from ml.flow.loader import (
     CAPTURE_DAY_COL,
+    MIN_MEANINGFUL_BLOCK_ROWS,
     ORDER_IDX_COL,
     clean_dataset,
     load_cicids2017,
+    split_dataset_by_strategy,
     split_dataset_temporal,
 )
 from ml.flow.pipelines.base import FEATURE_NAMES_FILE
 from ml.flow.serving import CascadeInferenceService
 from ml.training.train_cicids import _build_config, _build_matrices, main
+from tests.conftest import CICIDS_RARE_CLASS_LABEL
 
 # ============================================================================
 # Config construction
@@ -54,6 +57,7 @@ class TestBuildConfig:
             "data_dir": "api/csvs",
             "output_dir": "models/flow",
             "sample_size": 5000,
+            "class_sample_floor": 0,
             "split": "temporal",
             "temporal_block": "sub-label",
             "beta": 2.0,
@@ -68,6 +72,7 @@ class TestBuildConfig:
         assert config.data_path == Path("api/csvs")
         assert config.output_path == Path("models/flow")
         assert config.sample_size == 5000
+        assert config.class_sample_floor == 0
         assert config.split_strategy == "temporal"
         assert config.beta == 2.0
         assert config.random_seed == 7
@@ -85,6 +90,19 @@ class TestBuildConfig:
     def test_an_unknown_strategy_is_rejected_at_construction(self) -> None:
         with pytest.raises(ValueError, match="Unknown split_strategy"):
             self._config(split="chronological")
+
+    def test_the_class_sample_floor_reaches_the_config(self) -> None:
+        assert self._config(class_sample_floor=2000).class_sample_floor == 2000
+
+    def test_the_cli_default_leaves_sampling_strictly_proportional(self) -> None:
+        """
+        The floor is opt-in so that a default invocation reproduces the figures
+        in docs/ml/PARTICION-TEMPORAL.md. The CLI default is read off
+        ``FlowConfig``, so the two cannot drift apart — this pins the value they
+        share.
+        """
+        floor = next(param for param in main.params if param.name == "class_sample_floor").default
+        assert floor == 0 == FlowConfig().class_sample_floor
 
 
 # ============================================================================
@@ -106,7 +124,7 @@ class TestBuildMatrices:
         frame = clean_dataset(load_cicids2017(cicids_mini_csv))
         train_df, val_df, test_df = split_dataset_temporal(frame, FlowConfig())
 
-        dataset = _build_matrices(train_df, val_df, test_df)
+        dataset = _build_matrices(train_df, val_df, test_df, FlowConfig())
 
         assert CAPTURE_DAY_COL not in dataset.feature_names
         assert ORDER_IDX_COL not in dataset.feature_names
@@ -117,7 +135,7 @@ class TestBuildMatrices:
         frame = clean_dataset(load_cicids2017(cicids_mini_csv))
         train_df, val_df, test_df = split_dataset_temporal(frame, FlowConfig())
 
-        dataset = _build_matrices(train_df, val_df, test_df)
+        dataset = _build_matrices(train_df, val_df, test_df, FlowConfig())
 
         assert set(dataset.labels) == {"BENIGN", "BruteForce", "DDoS", "DoS", "Scan", "WebAttack"}
         # In CLASS_ORDER order, not in the order the frames happened to list
@@ -125,11 +143,42 @@ class TestBuildMatrices:
         # of the probability matrices the comparison figures read.
         assert dataset.labels == [c for c in CLASS_ORDER if c in set(dataset.labels)]
 
+    def test_the_training_matrix_carries_a_temporal_index_aligned_with_it(
+        self, cicids_mini_csv: Path
+    ) -> None:
+        """
+        Stage 2's hyperparameter search cuts its folds from this index, and the
+        only thing that ties it to ``X_train`` is that both were built from the
+        same frame in the same row order.
+        """
+        frame = clean_dataset(load_cicids2017(cicids_mini_csv))
+        config = FlowConfig()
+        train_df, val_df, test_df = split_dataset_temporal(frame, config)
+
+        dataset = _build_matrices(train_df, val_df, test_df, config)
+
+        assert dataset.train_index is not None
+        assert len(dataset.train_index) == dataset.X_train.shape[0]
+        np.testing.assert_array_equal(dataset.train_index.order, train_df[ORDER_IDX_COL].to_numpy())
+
+    def test_a_random_split_carries_no_temporal_index(self, cicids_mini_csv: Path) -> None:
+        """
+        A random split shuffles rows across every block, so "the chunk before
+        this one" means nothing in it. The folds stay shuffled, deliberately.
+        """
+        frame = clean_dataset(load_cicids2017(cicids_mini_csv))
+        config = FlowConfig(split_strategy="random")
+        train_df, val_df, test_df = split_dataset_by_strategy(frame, config)
+
+        dataset = _build_matrices(train_df, val_df, test_df, config)
+
+        assert dataset.train_index is None
+
     def test_the_matrices_are_float32(self, cicids_mini_csv: Path) -> None:
         frame = clean_dataset(load_cicids2017(cicids_mini_csv))
         train_df, val_df, test_df = split_dataset_temporal(frame, FlowConfig())
 
-        dataset = _build_matrices(train_df, val_df, test_df)
+        dataset = _build_matrices(train_df, val_df, test_df, FlowConfig())
 
         assert dataset.X_train.dtype == np.float32
         assert dataset.X_val.dtype == np.float32
@@ -249,7 +298,7 @@ def cicids_full_width_csv(tmp_path: Path) -> Path:
     return data_dir
 
 
-def _invoke(data_dir: Path, output_dir: Path, *extra: str) -> dict:
+def _invoke(data_dir: Path, output_dir: Path, *extra: str, pipeline: str = "xgb") -> dict:
     """Run the CLI and return the parsed run summary."""
     result = CliRunner().invoke(
         main,
@@ -259,7 +308,7 @@ def _invoke(data_dir: Path, output_dir: Path, *extra: str) -> dict:
             "--output-dir",
             str(output_dir),
             "--pipeline",
-            "xgb",
+            pipeline,
             "--skip-tuning",
             "--no-plots",
             "--no-eda",
@@ -345,6 +394,174 @@ class TestFlowTrainingCli:
 
         # What `metrics` publishes is the held-out figure, not the selection one.
         assert summary["metrics"]["cascade_xgb"]["if_recall"] == test["recall"]
+
+    def test_the_summary_records_the_per_class_f1_and_support_of_every_cascade(
+        self, cicids_mini_csv: Path, tmp_path: Path
+    ) -> None:
+        """
+        A macro average hides exactly the failure this track has: one class at
+        F1 0.00 costs 1/n of the headline and is invisible in it. The per-class
+        block is kept out of ``metrics`` — that one is flat scalars, logged
+        value by value — and carries the test support alongside every F1,
+        because 0.00 on 24 rows and 0.00 on 24.000 are different results.
+        """
+        summary = _invoke(cicids_mini_csv, tmp_path / "flow-per-class")
+
+        classes = summary["data"]["classes"]
+        per_class = summary["per_class"]["cascade_xgb"]
+
+        assert set(per_class) == {"f1", "support"}
+        assert list(per_class["f1"]) == classes
+        assert list(per_class["support"]) == classes
+        assert sum(per_class["support"].values()) == summary["data"]["test_size"]
+
+        # The headline is the unweighted mean of this table, which is what makes
+        # the table an explanation of it rather than a second opinion.
+        f1_macro = summary["metrics"]["cascade_xgb"]["f1_macro"]
+        assert f1_macro == pytest.approx(float(np.mean(list(per_class["f1"].values()))))
+
+    def test_the_summary_records_the_per_split_support_of_every_class(
+        self, cicids_mini_csv: Path, tmp_path: Path
+    ) -> None:
+        """
+        The per-class F1 table is only readable next to the row counts it was
+        computed from. ``class_support`` is model-free and sits at the top level
+        for that reason: it belongs to the run, not to a cascade.
+        """
+        summary = _invoke(cicids_mini_csv, tmp_path / "flow-support")
+
+        support = summary["class_support"]
+        assert list(support) == summary["data"]["classes"]
+
+        for counts in support.values():
+            assert set(counts) == {"train", "val", "test", "total"}
+            assert counts["total"] == counts["train"] + counts["val"] + counts["test"]
+
+        assert sum(c["train"] for c in support.values()) == summary["data"]["train_size"]
+        assert sum(c["val"] for c in support.values()) == summary["data"]["val_size"]
+        assert sum(c["test"] for c in support.values()) == summary["data"]["test_size"]
+
+        # The supports recorded per cascade are the test column of this table:
+        # one measurement, not two.
+        per_class = summary["per_class"]["cascade_xgb"]["support"]
+        assert per_class == {name: counts["test"] for name, counts in support.items()}
+
+    def test_the_summary_records_whether_the_sampling_floor_was_on(
+        self, cicids_mini_csv: Path, tmp_path: Path
+    ) -> None:
+        """
+        The floor changes the BENIGN:attack ratio that Stage 1's threshold
+        search sees, and that threshold serves every class — so two runs with
+        the same protocol and different floors are not comparable, and the file
+        has to say which one it was.
+        """
+        summary = _invoke(cicids_mini_csv, tmp_path / "flow-no-floor")
+        assert summary["parameters"]["class_sample_floor"] == 0
+
+    def test_the_floor_keeps_a_rare_class_off_the_floor_of_the_support_table(
+        self, cicids_rare_class_csv: Path, tmp_path: Path
+    ) -> None:
+        """
+        End to end on the Botnet-shaped fixture: a proportional draw grinds the
+        rare class down, and `--class-sample-floor` is what stops it. Both runs
+        are asserted from ``class_support`` alone, which is the point of the
+        block — the per-class F1 of a ~10-row class is noise either way.
+        """
+        rare = CICIDS_RARE_CLASS_LABEL
+        common = ["--sample-size", "1000"]
+
+        proportional = _invoke(cicids_rare_class_csv, tmp_path / "flow-prop", *common)
+        floored = _invoke(
+            cicids_rare_class_csv,
+            tmp_path / "flow-floor",
+            *common,
+            "--class-sample-floor",
+            "60",
+        )
+
+        assert proportional["parameters"]["class_sample_floor"] == 0
+        assert floored["parameters"]["class_sample_floor"] == 60
+
+        assert proportional["class_support"][rare]["total"] < 60
+        assert floored["class_support"][rare]["total"] == 60
+
+        # It is a floor, not a rebalance: the classes above it stay where they
+        # were, minus the seats the lift cost them.
+        assert (
+            floored["class_support"]["BENIGN"]["total"]
+            < (proportional["class_support"]["BENIGN"]["total"])
+        )
+
+    def test_a_class_too_small_to_measure_is_reported_and_kept(
+        self, cicids_rare_class_csv: Path, tmp_path: Path
+    ) -> None:
+        """
+        Dropping the class would lift the headline F1-macro by deleting the
+        evidence for it, and Botnet is served — ml/flow/fusion.py maps
+        credential_stuffing onto it. So it stays in ``data.classes``, in the
+        per-class table, and in the macro's denominator.
+        """
+        summary = _invoke(cicids_rare_class_csv, tmp_path / "flow-rare", "--sample-size", "1000")
+
+        rare = CICIDS_RARE_CLASS_LABEL
+        assert summary["class_support"][rare]["total"] < MIN_MEANINGFUL_BLOCK_ROWS
+        assert rare in summary["data"]["classes"]
+        assert rare in summary["per_class"]["cascade_xgb"]["f1"]
+
+    def test_the_headline_f1_macro_and_the_comparison_f1_macro_are_computed_over_the_same_class_set(
+        self, cicids_mini_csv: Path, tmp_path: Path
+    ) -> None:
+        """
+        A ``--pipeline both`` run measures each cascade twice: ``evaluate`` fills
+        ``metrics``, and ``compare_models`` fills ``comparison``. They used to
+        disagree by construction — only the second passed the canonical class
+        list — so the same model carried two F1-macros in one file with nothing
+        saying which was the result. Now both average over ``data.classes``.
+
+        Held out on friday so that the run declares six classes while the test
+        set carries only friday's three. What that pins here is the denominator:
+        an unsupported class still counts. It does not on its own pin the
+        ``labels=`` argument — Stage 2 predicts the missing classes *somewhere*
+        on this fixture, so the sklearn default union covers all six anyway. The
+        arithmetic teeth for that live in
+        ``test_flow_pipelines.py::…_scores_a_class_with_no_test_support_…``,
+        where the class set is chosen rather than emergent.
+        """
+        summary = _invoke(
+            cicids_mini_csv,
+            tmp_path / "flow-both",
+            "--split",
+            "day-holdout",
+            "--test-days",
+            "friday",
+            pipeline="both",
+        )
+
+        assert sorted(summary["metrics"]) == ["cascade_mlp", "cascade_xgb"]
+
+        support = summary["per_class"]["cascade_xgb"]["support"]
+        unsupported = [cls for cls, n in support.items() if n == 0]
+        assert unsupported, "holding friday out must leave a declared class with no test rows"
+
+        # The macro counts every declared class, so it is strictly below the
+        # average over the classes that happen to have test rows — which is the
+        # figure an unconstrained f1_score would have published.
+        supported = [
+            f1 for cls, f1 in summary["per_class"]["cascade_xgb"]["f1"].items() if support[cls]
+        ]
+        assert summary["metrics"]["cascade_xgb"]["f1_macro"] < float(np.mean(supported))
+
+        # model_a is the XGBoost cascade, model_b the MLP — the order
+        # _run_comparison passes them in.
+        for name, side in (("cascade_xgb", "model_a"), ("cascade_mlp", "model_b")):
+            for metric in ("accuracy", "f1_macro", "f1_weighted"):
+                assert summary["metrics"][name][metric] == pytest.approx(
+                    summary["comparison"][metric][side]
+                ), f"{name}.{metric} disagrees between metrics and comparison"
+
+            assert summary["per_class"][name]["f1"] == pytest.approx(
+                {cls: row[side] for cls, row in summary["comparison"]["f1_per_class"].items()}
+            )
 
     def test_day_holdout_records_the_days_it_held_out(
         self, cicids_mini_csv: Path, tmp_path: Path

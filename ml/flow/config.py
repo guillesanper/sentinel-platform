@@ -40,9 +40,12 @@ SPLIT_STRATEGIES: Final[tuple[str, ...]] = ("temporal", "random", "day-holdout")
 #               is a different one, and only the multi-tool classes are actually
 #               asked it, so its F1-macro averages incomparable quantities.
 #
-# Measured on CICIDS2017 (200k flows, xgb, no tuning): F1-macro 0.7721 with
-# `sub-label` against 0.2973 with `class`, both under the same chronological
-# guarantee. See docs/ml/PARTICION-TEMPORAL.md.
+# Measured on CICIDS2017 (200k flows, xgb, no tuning): F1-macro 0.6467 with
+# `sub-label` against 0.6547 with `class`, both under the same chronological
+# guarantee. The two used to be 0.7721 and 0.2973; that gap was mediated by the
+# Stage 1 threshold and closed when `order_idx` stopped ordering the CSVs
+# alphabetically. The default stays `sub-label` on what it measures, not on its
+# number. See docs/ml/PARTICION-TEMPORAL.md.
 TEMPORAL_BLOCKS: Final[tuple[str, ...]] = ("sub-label", "class")
 
 
@@ -112,6 +115,14 @@ class XGBoostConfig:
         }
     )
     n_iter_search: int = 20
+
+    # K folds over K+1 chronological chunks per (capture_day, label) block:
+    # fold k trains on chunks 0..k-1 and validates on chunk k. Not a K-fold —
+    # see ml/flow/cv.py for why an expanding window is the only scheme that does
+    # not put a flow's own future in its training half. Cheaper than the
+    # shuffled K-fold it replaced, at (1+2+3)/4 = 1.5n of fitting against 2.0n,
+    # and it falls back to StratifiedKFold(shuffle=True) — loudly — when no
+    # temporal index reaches the search.
     cv_folds: int = 3
 
 
@@ -191,6 +202,16 @@ class FlowConfig:
     # --- Sampling ---
     sample_size: int = 1_000_000  # 0 → use the full dataset
 
+    # Minimum rows a class keeps in the stratified sample, whatever its share of
+    # the dataset. **Opt-in, and deliberately 0 by default**: strictly
+    # proportional sampling is what produced every figure in
+    # docs/ml/PARTICION-TEMPORAL.md, and a floor turned on silently would move
+    # them. It is also not a per-class knob — raising a rare class changes the
+    # BENIGN:attack ratio the Stage 1 F-beta threshold search sees, and that
+    # threshold is shared by all seven classes, so the floor moves the numbers
+    # of classes it does not touch. See ml.flow.loader.stratified_sample.
+    class_sample_floor: int = 0
+
     # --- Dataset partitioning ---
     split_strategy: str = "temporal"
     temporal_block: str = "sub-label"
@@ -216,6 +237,7 @@ class FlowConfig:
         _validate_ratios(self.train_ratio, self.val_ratio, self.test_ratio)
         _validate_split_strategy(self.split_strategy)
         _validate_temporal_block(self.temporal_block)
+        _validate_class_sample_floor(self.class_sample_floor)
 
     @property
     def eda_path(self) -> Path:
@@ -271,6 +293,12 @@ def _validate_split_strategy(strategy: str) -> None:
         raise ValueError(
             f"Unknown split_strategy {strategy!r}. Expected one of {list(SPLIT_STRATEGIES)}"
         )
+
+
+def _validate_class_sample_floor(floor: int) -> None:
+    """Raise when the per-class sampling floor is negative."""
+    if floor < 0:
+        raise ValueError(f"class_sample_floor must be >= 0, got {floor}")
 
 
 def _validate_temporal_block(block: str) -> None:

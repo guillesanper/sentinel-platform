@@ -21,22 +21,47 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.metrics import f1_score
 
 from ml.flow.config import FlowConfig, IsolationForestConfig, XGBoostConfig
 from ml.flow.labels import BENIGN_LABEL, CLASS_ORDER
 from ml.flow.loader import (
     LABEL_COL,
+    build_temporal_index,
     clean_dataset,
     get_feature_columns,
     load_cicids2017,
     split_dataset_temporal,
 )
 from ml.flow.pipelines import FEATURE_NAMES_FILE, BaseCascadePipeline, CascadeXGBPipeline
+from ml.flow.pipelines import cascade_xgb as cascade_xgb_module
 from ml.flow.pipelines.base import FEATURE_NAMES_FORMAT_VERSION
 
 # ============================================================================
 # Fixtures
 # ============================================================================
+
+
+class _LogSpy:
+    """
+    Records the structlog events of whichever module logger it replaces.
+
+    Same reason as ``test_flow_loader._LogSpy``: ``api.middleware.logging``
+    configures structlog with ``cache_logger_on_first_use=True``, so whether an
+    event reaches ``caplog`` depends on which test ran first.
+    """
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str, dict]] = []
+
+    def __getattr__(self, level: str):
+        def record(event: str, **kwargs) -> None:
+            self.events.append((level, event, kwargs))
+
+        return record
+
+    def names(self, level: str | None = None) -> list[str]:
+        return [name for lvl, name, _ in self.events if level is None or lvl == level]
 
 
 def _small_config() -> FlowConfig:
@@ -50,11 +75,20 @@ def _small_config() -> FlowConfig:
 class _Split:
     """The six arrays a cascade needs, plus the column order that produced them."""
 
-    def __init__(self, train: pd.DataFrame, val: pd.DataFrame, test: pd.DataFrame) -> None:
+    def __init__(
+        self,
+        train: pd.DataFrame,
+        val: pd.DataFrame,
+        test: pd.DataFrame,
+        config: FlowConfig,
+    ) -> None:
         self.feature_names = get_feature_columns(train)
         self.X_train, self.y_train = self._arrays(train)
         self.X_val, self.y_val = self._arrays(val)
         self.X_test, self.y_test = self._arrays(test)
+        # Built from the frame, on the same rows and in the same order as
+        # X_train — which is the whole contract of a TemporalIndex.
+        self.train_index = build_temporal_index(train, config)
 
     def _arrays(self, df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
         return df[self.feature_names].to_numpy(), df[LABEL_COL].to_numpy()
@@ -66,7 +100,7 @@ def flow_split(cicids_mini_csv: Path) -> _Split:
     config = _small_config()
     df = clean_dataset(load_cicids2017(cicids_mini_csv))
     train, val, test = split_dataset_temporal(df, config)
-    return _Split(train, val, test)
+    return _Split(train, val, test, config)
 
 
 @pytest.fixture
@@ -252,6 +286,139 @@ class TestCascadeXGBTraining:
 
 
 # ============================================================================
+# The temporal index on its way to Stage 2
+# ============================================================================
+
+
+class _TuneSpy:
+    """Records the arguments of ``tune_hyperparameters`` instead of searching."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def __call__(self, X, y, *, train_index=None) -> dict:
+        self.calls.append({"X": X, "y": y, "train_index": train_index})
+        return {}
+
+
+class TestStage2TuningIndex:
+    """
+    Stage 2 tunes on the flows Stage 1 routed, so the index has to be narrowed by
+    that same routing — see :mod:`ml.flow.cv`.
+
+    The searches themselves are stubbed out: what is under test is which rows
+    the index describes when it arrives, not what the search does with them.
+    """
+
+    def _tuned(self, pipeline: CascadeXGBPipeline, split: _Split, **kwargs) -> _TuneSpy:
+        spy = _TuneSpy()
+        pipeline.stage2_classifier.tune_hyperparameters = spy  # type: ignore[method-assign]
+        pipeline.train(
+            split.X_train,
+            split.y_train,
+            split.X_val,
+            split.y_val,
+            skip_tuning=False,
+            feature_names=split.feature_names,
+            **kwargs,
+        )
+        return spy
+
+    def test_stage2_receives_the_index_narrowed_by_the_same_anomaly_mask(self, flow_split: _Split):
+        """
+        The silent failure this guards: an index narrowed by any other mask has a
+        plausible length, produces plausible folds, and picks hyperparameters
+        from rows it is not describing. Nothing raises.
+        """
+        pipeline = CascadeXGBPipeline(_small_config())
+
+        spy = self._tuned(pipeline, flow_split, train_index=flow_split.train_index)
+
+        assert len(spy.calls) == 1
+        received = spy.calls[0]["train_index"]
+        routed = pipeline.if_model.predict_binary(flow_split.X_train).astype(bool)
+
+        assert len(received) == int(routed.sum())
+        assert len(received) == spy.calls[0]["X"].shape[0]
+        np.testing.assert_array_equal(received.order, flow_split.train_index.order[routed])
+        np.testing.assert_array_equal(received.block, flow_split.train_index.block[routed])
+
+    def test_tuning_without_an_index_still_runs_and_warns_under_a_temporal_split(
+        self, flow_split: _Split, monkeypatch: pytest.MonkeyPatch
+    ):
+        """
+        A run that claims a chronological partition and tunes on shuffled folds
+        has to say so: the two are indistinguishable from the metrics alone.
+        """
+        spy_log = _LogSpy()
+        monkeypatch.setattr(cascade_xgb_module, "logger", spy_log)
+        pipeline = CascadeXGBPipeline(_small_config())
+
+        spy = self._tuned(pipeline, flow_split)
+
+        assert spy.calls[0]["train_index"] is None
+        assert "xgb_tuning_temporal_folds_unavailable" in spy_log.names("warning")
+
+    def test_a_random_split_reports_the_shuffled_folds_without_warning(
+        self, flow_split: _Split, monkeypatch: pytest.MonkeyPatch
+    ):
+        """
+        ``--split random`` makes no chronological claim, so shuffled folds match
+        the protocol exactly. Warning about it would be noise, and noise is what
+        trains people to ignore the warning above.
+        """
+        spy_log = _LogSpy()
+        monkeypatch.setattr(cascade_xgb_module, "logger", spy_log)
+        config = _small_config()
+        config.split_strategy = "random"
+        pipeline = CascadeXGBPipeline(config)
+
+        self._tuned(pipeline, flow_split)
+
+        assert "xgb_tuning_folds_random_by_protocol" in spy_log.names("info")
+        assert "xgb_tuning_temporal_folds_unavailable" not in spy_log.names("warning")
+
+    def test_skipping_the_search_ignores_the_index_entirely(self, flow_split: _Split):
+        """The index is an input of the search; without a search it is inert."""
+        pipeline = CascadeXGBPipeline(_small_config())
+        spy = _TuneSpy()
+        pipeline.stage2_classifier.tune_hyperparameters = spy  # type: ignore[method-assign]
+
+        pipeline.train(
+            flow_split.X_train,
+            flow_split.y_train,
+            flow_split.X_val,
+            flow_split.y_val,
+            skip_tuning=True,
+            feature_names=flow_split.feature_names,
+            train_index=flow_split.train_index,
+        )
+
+        assert spy.calls == []
+
+    def test_an_index_of_the_wrong_length_fails_at_the_mask(self, flow_split: _Split):
+        """
+        Caught where the mask is applied, not several layers down inside the
+        search — the point of TemporalIndex.mask validating its argument.
+        """
+        pipeline = CascadeXGBPipeline(_small_config())
+        stale = flow_split.train_index.mask(
+            np.arange(len(flow_split.train_index)) < len(flow_split.train_index) - 1
+        )
+
+        with pytest.raises(ValueError, match="describes"):
+            pipeline.train(
+                flow_split.X_train,
+                flow_split.y_train,
+                flow_split.X_val,
+                flow_split.y_val,
+                skip_tuning=True,
+                feature_names=flow_split.feature_names,
+                train_index=stale,
+            )
+
+
+# ============================================================================
 # Prediction and evaluation
 # ============================================================================
 
@@ -290,6 +457,58 @@ class TestCascadeXGBPredict:
 
         assert {"accuracy", "f1_macro", "f1_weighted"} <= set(metrics)
         assert all(0.0 <= metrics[k] <= 1.0 for k in ("accuracy", "f1_macro", "f1_weighted"))
+
+    def test_evaluate_scores_a_class_with_no_test_support_as_zero_when_the_canonical_labels_are_given(
+        self, trained_cascade: CascadeXGBPipeline, flow_split: _Split
+    ):
+        """
+        The macro's denominator is a claim about which classes were measured.
+
+        Without ``labels=``, sklearn averages over the union of ``y_test`` and
+        ``y_pred``: a class neither carried by the test set nor ever predicted
+        leaves the average entirely, so the headline rises by dropping the
+        evidence rather than by classifying better. The
+        mini fixture carries six of the eight canonical classes, which makes the
+        arithmetic exact — the constrained macro is the unconstrained one scaled
+        by 6/8, because the two missing classes score 0.0 and stay in.
+        """
+        present = set(flow_split.y_test) | set(trained_cascade.predict(flow_split.X_test))
+        canonical = list(CLASS_ORDER)
+        assert present < set(canonical), "the fixture must leave a class unsupported"
+
+        unconstrained = trained_cascade.evaluate(flow_split.X_test, flow_split.y_test)
+        constrained = trained_cascade.evaluate(
+            flow_split.X_test, flow_split.y_test, labels=canonical
+        )
+
+        assert constrained["f1_macro"] == pytest.approx(
+            unconstrained["f1_macro"] * len(present) / len(canonical)
+        )
+        assert constrained["f1_macro"] < unconstrained["f1_macro"]
+
+        # Accuracy has no class denominator, and the weighted average gives a
+        # zero-support class zero weight. Only the macro was ever at risk.
+        assert constrained["accuracy"] == unconstrained["accuracy"]
+        assert constrained["f1_weighted"] == pytest.approx(unconstrained["f1_weighted"])
+
+    def test_evaluate_without_labels_keeps_the_behaviour_the_saved_runs_were_measured_with(
+        self, trained_cascade: CascadeXGBPipeline, flow_split: _Split
+    ):
+        """
+        ``labels`` defaults to None so that the figures already published stay
+        reproducible from this code. Every caller that means the canonical class
+        list has to say so; nothing changes underneath one that does not.
+        """
+        y_pred = trained_cascade.predict(flow_split.X_test)
+
+        metrics = trained_cascade.evaluate(flow_split.X_test, flow_split.y_test)
+
+        assert metrics["f1_macro"] == pytest.approx(
+            f1_score(flow_split.y_test, y_pred, average="macro", zero_division=0)
+        )
+        assert metrics["f1_weighted"] == pytest.approx(
+            f1_score(flow_split.y_test, y_pred, average="weighted", zero_division=0)
+        )
 
     def test_evaluate_includes_the_stage1_operating_point(
         self, trained_cascade: CascadeXGBPipeline, flow_split: _Split
@@ -582,8 +801,17 @@ class TestCascadeMLPSmoke:
         config.neural_network.lr_warmup_epochs = 1
         return config
 
-    def test_train_predict_evaluate_and_roundtrip(self, flow_split: _Split, tmp_path: Path):
+    def test_train_predict_evaluate_and_roundtrip(
+        self,
+        flow_split: _Split,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import ml.flow.pipelines.cascade_mlp as mlp_module
         from ml.flow.pipelines.cascade_mlp import CascadeMLPPipeline
+
+        spy = _LogSpy()
+        monkeypatch.setattr(mlp_module, "logger", spy)
 
         pipeline = CascadeMLPPipeline(self._config())
         pipeline.train(
@@ -594,8 +822,14 @@ class TestCascadeMLPSmoke:
             beta=2.0,
             skip_tuning=True,
             feature_names=flow_split.feature_names,
+            # Accepted and ignored: this cascade has no hyperparameter search,
+            # so there are no folds for a chronological index to shape. It takes
+            # the argument so that the training CLI can hand every cascade the
+            # same call.
+            train_index=flow_split.train_index,
         )
 
+        assert "cascade_train_index_ignored" in spy.names()
         assert pipeline.name == "cascade_mlp"
         assert set(pipeline.predict(flow_split.X_test)) <= set(CLASS_ORDER)
         assert {"accuracy", "f1_macro"} <= set(

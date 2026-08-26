@@ -18,12 +18,15 @@ import pytest
 
 import ml.flow.loader as loader_module
 from ml.flow.config import FlowConfig
+from ml.flow.labels import CLASS_ORDER
 from ml.flow.loader import (
     CAPTURE_DAY_COL,
     LABEL_COL,
     META_COLUMNS,
+    MIN_MEANINGFUL_BLOCK_ROWS,
     ORDER_IDX_COL,
     RAW_LABEL_COL,
+    audit_class_support,
     clean_dataset,
     filter_minority_classes,
     get_feature_columns,
@@ -34,7 +37,12 @@ from ml.flow.loader import (
     split_dataset_temporal,
     stratified_sample,
 )
-from tests.conftest import CICIDS_MINI_FEATURES, CICIDS_MINI_MULTI_TOOL_CLASSES
+from tests.conftest import (
+    CICIDS_MINI_FEATURES,
+    CICIDS_MINI_MULTI_TOOL_CLASSES,
+    CICIDS_RARE_CLASS_ATTACK,
+    CICIDS_RARE_CLASS_LABEL,
+)
 
 # ============================================================================
 # Helpers
@@ -45,6 +53,18 @@ from tests.conftest import CICIDS_MINI_FEATURES, CICIDS_MINI_MULTI_TOOL_CLASSES
 def mini_df(cicids_mini_csv: Path) -> pd.DataFrame:
     """The mini dataset, loaded and cleaned — the usual starting point."""
     return clean_dataset(load_cicids2017(cicids_mini_csv))
+
+
+@pytest.fixture
+def rare_class_df(cicids_rare_class_csv: Path) -> pd.DataFrame:
+    """
+    The mini dataset plus a ~120-row ``Bot`` class, loaded and cleaned.
+
+    The starting point for everything about ``class_sample_floor``: the rare
+    class is large enough to clear ``min_class_samples`` and far too small to
+    survive a proportional draw, which is Botnet's situation exactly.
+    """
+    return clean_dataset(load_cicids2017(cicids_rare_class_csv))
 
 
 def _blocks(df: pd.DataFrame, label_col: str = RAW_LABEL_COL) -> set[tuple[str, str]]:
@@ -186,6 +206,141 @@ class TestLoadCicids2017:
         )
         with pytest.raises(KeyError, match="Label"):
             load_cicids2017(data_dir)
+
+
+# ============================================================================
+# Reading order — what makes order_idx chronological rather than alphabetical
+# ============================================================================
+
+
+def _write_capture_csv(path: Path, rows: list[tuple[str, float]]) -> None:
+    """
+    Write a CICIDS2017-shaped CSV from explicit ``(raw_label, marker)`` rows.
+
+    ``marker`` lands in ``Flow Duration`` and is what lets a test say which file
+    a surviving row came from — the loader keeps no provenance beyond the capture
+    day, and the whole point here is telling two files of the *same* day apart.
+    Markers must be unique across the directory or ``clean_dataset`` would
+    deduplicate rows away.
+    """
+    df = pd.DataFrame(
+        {
+            "Flow Duration": [marker for _, marker in rows],
+            "Total Fwd Packets": [1.0 + i for i in range(len(rows))],
+            "Flow Bytes/s": [marker * 10.0 for _, marker in rows],
+            "Label": [label for label, _ in rows],
+        }
+    )
+    df.columns = pd.Index([f" {c}" for c in df.columns])
+    df.to_csv(path, index=False, encoding="latin-1")
+
+
+class TestCaptureOrder:
+    """
+    ``order_idx`` counts rows in the order the files are read, so the reading
+    order *is* the chronology. Sorting the filenames does not give it: Friday's
+    two afternoon captures sort before its morning one, and Thursday inverts the
+    same way. Attack blocks live in a single file each and never notice; the
+    BENIGN blocks of Thursday and Friday span files and do — and BENIGN is the
+    population Stage 1 is fitted on.
+    """
+
+    # Rank order, which for these five is Tue → Wed → Thu-AM → Fri-PM-DDos →
+    # Fri-PM-PortScan. Alphabetically the two Friday files would come first.
+    EXPECTED_MINI_ORDER: ClassVar[list[str]] = [
+        "Tuesday-WorkingHours.pcap_ISCX.csv",
+        "Wednesday-workingHours.pcap_ISCX.csv",
+        "Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv",
+        "Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv",
+        "Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv",
+    ]
+
+    def test_files_are_read_in_capture_order_not_alphabetical_order(
+        self, cicids_mini_csv: Path, log_spy: _LogSpy
+    ):
+        load_cicids2017(cicids_mini_csv)
+
+        payload = log_spy.payloads("cicids_load_started")[0]
+        assert payload["file_order"] == self.EXPECTED_MINI_ORDER
+        assert payload["file_order"] != sorted(
+            self.EXPECTED_MINI_ORDER
+        ), "the fixture must be able to tell the two orders apart"
+
+    def test_order_idx_follows_the_capture_week(self, cicids_mini_csv: Path):
+        """The days themselves must come out Tue < Wed < Thu < Fri."""
+        df = load_cicids2017(cicids_mini_csv)
+        first_seen = df.groupby(CAPTURE_DAY_COL, observed=True)[ORDER_IDX_COL].min()
+
+        assert list(first_seen.sort_values().index) == [
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+        ]
+
+    def test_an_unrecognised_filename_sorts_last_without_breaking_the_load(
+        self, tmp_path: Path, log_spy: _LogSpy
+    ):
+        """
+        A directory the canonical ranking says nothing about still loads, and
+        still loads deterministically: unknown names share the last rank and are
+        tie-broken by name. Here the extra file sorts *first* alphabetically, so
+        only the ranking can put Monday ahead of it.
+        """
+        data_dir = tmp_path / "extra-file"
+        data_dir.mkdir()
+        _write_capture_csv(
+            data_dir / "Monday-WorkingHours.pcap_ISCX.csv",
+            [("BENIGN", float(i)) for i in range(10)],
+        )
+        _write_capture_csv(
+            data_dir / "Aardvark-WorkingHours.csv",
+            [("BENIGN", 100.0 + i) for i in range(10)],
+        )
+
+        df = load_cicids2017(data_dir)
+
+        assert log_spy.payloads("cicids_load_started")[0]["file_order"] == [
+            "Monday-WorkingHours.pcap_ISCX.csv",
+            "Aardvark-WorkingHours.csv",
+        ]
+        assert len(df) == 20
+        monday = df.loc[df[CAPTURE_DAY_COL] == "monday", ORDER_IDX_COL]
+        unknown = df.loc[df[CAPTURE_DAY_COL] == "unknown", ORDER_IDX_COL]
+        assert monday.max() < unknown.min()
+
+    def test_the_friday_benign_block_is_cut_with_the_morning_capture_first(self, tmp_path: Path):
+        """
+        The regression this fix exists for. ``(friday, BENIGN)`` spans three
+        files; under the alphabetical glob the afternoon captures were numbered
+        *before* the morning one, so the block's chronological cut ran backwards
+        and Stage 1 was fitted on Friday's last hours to be tested on its first.
+
+        Two files are enough to show it, and the assertion is directional: the
+        morning rows belong in train, the late afternoon ones in test.
+        """
+        data_dir = tmp_path / "friday"
+        data_dir.mkdir()
+        # Markers below 500 are morning, above are afternoon.
+        _write_capture_csv(
+            data_dir / "Friday-WorkingHours-Morning.pcap_ISCX.csv",
+            [("BENIGN", float(i)) for i in range(20)] + [("Bot", 200.0 + i) for i in range(10)],
+        )
+        _write_capture_csv(
+            data_dir / "Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv",
+            [("BENIGN", 500.0 + i) for i in range(20)] + [("DDoS", 700.0 + i) for i in range(10)],
+        )
+
+        df = clean_dataset(load_cicids2017(data_dir))
+        train, _, test = split_dataset_temporal(df)
+
+        def benign_markers(split: pd.DataFrame) -> set[float]:
+            return set(split.loc[split[LABEL_COL] == "BENIGN", "Flow Duration"].astype(float))
+
+        morning = {float(i) for i in range(20)}
+        assert morning <= benign_markers(train), "the morning capture is the earliest, so it trains"
+        assert not (benign_markers(test) & morning), "no morning flow may land in test"
+        assert benign_markers(test), "test must still carry BENIGN, or the check is vacuous"
 
 
 # ============================================================================
@@ -435,6 +590,311 @@ class TestStratifiedSample:
             }
         )
         assert len(loader_module._proportional_topup(remaining, 50, seed=42)) == 2
+
+
+# ============================================================================
+# The per-class sampling floor — opt-in, and off by default on purpose
+# ============================================================================
+
+
+class TestClassSampleFloor:
+    """
+    ``class_sample_floor`` protects a rare class from proportional sampling.
+
+    The class it exists for is Botnet: one sub-label, one day, ~1.966 rows out
+    of ~2.8M, of which ``--sample-size 200000`` keeps ~155 and the split leaves
+    ~24 in test. Its published F1 of 0.00 is measured on those 24 rows.
+    """
+
+    def test_the_floor_is_off_by_default(self):
+        """
+        Every figure in docs/ml/PARTICION-TEMPORAL.md was measured under strict
+        proportionality. A floor switched on by default would move them without
+        a line of the diff saying so.
+        """
+        assert FlowConfig().class_sample_floor == 0
+
+    def test_the_default_config_never_reaches_the_floored_path(
+        self, mini_df: pd.DataFrame, monkeypatch: pytest.MonkeyPatch
+    ):
+        """
+        Stronger than comparing outputs: the published runs must go through the
+        *same code* they always did, not through a floored path that happens to
+        agree at floor 0.
+        """
+
+        def explode(*args, **kwargs):
+            raise AssertionError("the floored path ran under the default config")
+
+        monkeypatch.setattr(loader_module, "_floored_sample", explode)
+        assert len(stratified_sample(mini_df, FlowConfig(sample_size=500))) == 500
+
+    def test_a_negative_floor_is_rejected_at_construction(self):
+        with pytest.raises(ValueError, match="class_sample_floor must be >= 0"):
+            FlowConfig(class_sample_floor=-1)
+
+    def test_a_rare_class_is_lifted_to_the_floor_instead_of_sampled_to_noise(
+        self, rare_class_df: pd.DataFrame
+    ):
+        proportional = stratified_sample(rare_class_df, FlowConfig(sample_size=1_000))
+        floored = stratified_sample(
+            rare_class_df, FlowConfig(sample_size=1_000, class_sample_floor=60)
+        )
+
+        rare = CICIDS_RARE_CLASS_LABEL
+        drawn = int((proportional[LABEL_COL] == rare).sum())
+        lifted = int((floored[LABEL_COL] == rare).sum())
+
+        assert drawn < 60 <= lifted
+        assert lifted == 60
+
+    def test_the_floor_is_capped_by_the_rows_the_class_actually_has(
+        self, rare_class_df: pd.DataFrame
+    ):
+        """
+        A floor is a request, not an invention: asking for more rows than exist
+        must hand back every row of the class, not resample it.
+        """
+        available = int((rare_class_df[LABEL_COL] == CICIDS_RARE_CLASS_LABEL).sum())
+        assert available == CICIDS_RARE_CLASS_ATTACK
+
+        floored = stratified_sample(
+            rare_class_df,
+            FlowConfig(sample_size=1_000, class_sample_floor=available + 5),
+        )
+        assert int((floored[LABEL_COL] == CICIDS_RARE_CLASS_LABEL).sum()) == available
+
+    def test_the_remaining_budget_is_still_split_proportionally(self, rare_class_df: pd.DataFrame):
+        """
+        Lifting one class costs the others seats, but it must not change how
+        those seats are shared out among them.
+        """
+        floored = stratified_sample(
+            rare_class_df, FlowConfig(sample_size=1_000, class_sample_floor=60)
+        )
+
+        source = rare_class_df[LABEL_COL].value_counts()
+        drawn = floored[LABEL_COL].value_counts()
+        others = [c for c in source.index if c != CICIDS_RARE_CLASS_LABEL]
+
+        # The mini fixture gives every attack class the same number of rows, so
+        # "proportional" is checkable directly: they must come back within a
+        # seat of each other, and BENIGN must keep its multiple of them.
+        attacks = [c for c in others if c != "BENIGN"]
+        assert max(drawn[attacks]) - min(drawn[attacks]) <= 1
+        assert drawn["BENIGN"] / drawn[attacks].mean() == pytest.approx(
+            source["BENIGN"] / source[attacks].mean(), rel=0.02
+        )
+
+    def test_the_total_is_exactly_the_sample_size(self, rare_class_df: pd.DataFrame):
+        """
+        The quotas are integers computed before any row is drawn, so — unlike
+        the proportional path, which rounds per class and then tops up — there
+        is nothing left to reconcile.
+        """
+        floored = stratified_sample(
+            rare_class_df, FlowConfig(sample_size=1_000, class_sample_floor=60)
+        )
+        assert len(floored) == 1_000
+        assert floored[ORDER_IDX_COL].is_unique
+
+    def test_order_idx_survives_the_floored_draw(self, rare_class_df: pd.DataFrame):
+        floored = stratified_sample(
+            rare_class_df, FlowConfig(sample_size=1_000, class_sample_floor=60)
+        )
+        assert set(floored[ORDER_IDX_COL]).issubset(set(rare_class_df[ORDER_IDX_COL]))
+
+    def test_the_floored_draw_is_reproducible(self, rare_class_df: pd.DataFrame):
+        config = FlowConfig(sample_size=1_000, class_sample_floor=60)
+        a = stratified_sample(rare_class_df, config)
+        b = stratified_sample(rare_class_df, config)
+        assert sorted(a[ORDER_IDX_COL]) == sorted(b[ORDER_IDX_COL])
+
+    def test_a_floor_the_budget_cannot_pay_for_is_reported_not_overshot(
+        self, rare_class_df: pd.DataFrame, log_spy: _LogSpy
+    ):
+        """
+        Seven classes at a floor of 200 cost more than a 1.000-row budget. There
+        is no allocation that honours both, so the floor is dropped for the run
+        and said so — returning 1.320 rows from a `--sample-size 1000` would
+        break the promise every caller downstream relies on.
+        """
+        floored = stratified_sample(
+            rare_class_df, FlowConfig(sample_size=1_000, class_sample_floor=200)
+        )
+
+        assert len(floored) == 1_000
+        assert "class_sample_floor_unaffordable" in log_spy.names("warning")
+
+        payload = log_spy.payloads("class_sample_floor_unaffordable")[0]
+        assert payload["sample_size"] == 1_000
+        assert payload["required"] > 1_000
+
+        # Degraded means proportional, not "floor applied to whoever fits".
+        # The rows themselves differ — exact quotas draw with `n=`, the
+        # proportional path with `frac=` — but the allocation is the same.
+        proportional = stratified_sample(rare_class_df, FlowConfig(sample_size=1_000))
+        assert (
+            floored[LABEL_COL].value_counts().to_dict()
+            == proportional[LABEL_COL].value_counts().to_dict()
+        )
+
+    def test_the_quotas_never_ask_a_class_for_more_rows_than_it_has(self):
+        """
+        The capacity cap is unreachable through ``stratified_sample`` — it only
+        floors a sample smaller than the dataset, and reserving a floor can only
+        shrink the seats-per-row ratio of the classes still free. It is checked
+        directly so the helper stays total if a caller ever asks for more seats
+        than there are rows.
+        """
+        counts = pd.Series({"BENIGN": 100, "Botnet": 4})
+        quotas = loader_module._class_quotas(counts, sample_size=104, floor=2)
+
+        assert quotas.to_dict() == {"BENIGN": 100, "Botnet": 4}
+
+    def test_the_quotas_lift_only_the_classes_below_the_floor(self):
+        counts = pd.Series({"BENIGN": 100_000, "DoS": 5_000, "Botnet": 1_966})
+        quotas = loader_module._class_quotas(counts, sample_size=20_000, floor=2_000)
+
+        assert int(quotas.sum()) == 20_000
+        # Botnet has fewer rows than the floor asks for, so it comes back whole.
+        assert quotas["Botnet"] == 1_966
+        # DoS is above the floor in absolute terms but its proportional quota
+        # (~916) is not, so the floor binds there too.
+        assert quotas["DoS"] == 2_000
+        assert quotas["BENIGN"] == 20_000 - 1_966 - 2_000
+
+    def test_the_quotas_hold_their_three_invariants_across_random_shapes(self):
+        """
+        The allocation is a fixed point of a loop, not a formula, so the three
+        properties it promises are checked over shapes rather than argued
+        about: the quotas sum to the budget, no class is asked for more rows
+        than it has, and — whenever the floors are affordable at all — every
+        class reaches its floor.
+        """
+        rng = np.random.default_rng(0)
+
+        for _ in range(300):
+            n_classes = int(rng.integers(1, 9))
+            counts = pd.Series(
+                rng.integers(1, 5_000, n_classes),
+                index=[f"class_{i}" for i in range(n_classes)],
+            )
+            available = int(counts.sum())
+            sample_size = int(rng.integers(1, available + 1))
+            floor = int(rng.integers(1, 3_000))
+
+            quotas = loader_module._class_quotas(counts, sample_size, floor)
+
+            assert int(quotas.sum()) == sample_size
+            assert (quotas <= counts).all()
+            assert (quotas >= 0).all()
+
+            floors = counts.clip(upper=floor)
+            if int(floors.sum()) <= sample_size:
+                assert (quotas >= floors).all()
+
+    def test_the_floored_draw_names_the_classes_it_lifted(
+        self, rare_class_df: pd.DataFrame, log_spy: _LogSpy
+    ):
+        """
+        The lifted classes are exactly the ones whose support in the published
+        tables is no longer proportional, so the run log has to name them.
+        """
+        stratified_sample(rare_class_df, FlowConfig(sample_size=1_000, class_sample_floor=60))
+
+        payload = log_spy.payloads("stratified_sample_drawn_with_floor")[0]
+        assert payload["lifted_classes"] == [CICIDS_RARE_CLASS_LABEL]
+        assert payload["floor"] == 60
+        assert sum(payload["quotas"].values()) == 1_000
+
+
+# ============================================================================
+# Per-split support audit
+# ============================================================================
+
+_Splits = tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
+
+
+class TestClassSupportAudit:
+    """
+    ``audit_class_support`` reports how many rows each class was measured on.
+
+    It runs after the partition because that is where the number that matters
+    appears: sampling sets how many rows a class has, the split sets how many
+    are left in test, and a per-class F1 is computed from the second.
+    """
+
+    @pytest.fixture
+    def splits(self, rare_class_df: pd.DataFrame) -> _Splits:
+        sampled = stratified_sample(rare_class_df, FlowConfig(sample_size=1_000))
+        return split_dataset_temporal(sampled, FlowConfig(sample_size=1_000))
+
+    def test_every_class_gets_its_three_counts_and_a_total(self, splits: _Splits):
+        support = audit_class_support(*splits, FlowConfig())
+
+        present = set(splits[0][LABEL_COL]) | set(splits[1][LABEL_COL]) | set(splits[2][LABEL_COL])
+        assert set(support) == {str(c) for c in present}
+        for counts in support.values():
+            assert set(counts) == {"train", "val", "test", "total"}
+            assert counts["total"] == counts["train"] + counts["val"] + counts["test"]
+
+    def test_the_counts_are_the_ones_the_splits_actually_carry(self, splits: _Splits):
+        train, val, test = splits
+        support = audit_class_support(train, val, test, FlowConfig())
+
+        rare = support[CICIDS_RARE_CLASS_LABEL]
+        assert rare["train"] == int((train[LABEL_COL] == CICIDS_RARE_CLASS_LABEL).sum())
+        assert rare["val"] == int((val[LABEL_COL] == CICIDS_RARE_CLASS_LABEL).sum())
+        assert rare["test"] == int((test[LABEL_COL] == CICIDS_RARE_CLASS_LABEL).sum())
+
+    def test_a_class_under_the_floor_is_reported_with_its_three_counts(
+        self, splits: _Splits, log_spy: _LogSpy
+    ):
+        audit_class_support(*splits, FlowConfig())
+
+        reported = {p["label"]: p for p in log_spy.payloads("class_support_below_floor")}
+        assert CICIDS_RARE_CLASS_LABEL in reported
+
+        payload = reported[CICIDS_RARE_CLASS_LABEL]
+        assert {"train", "val", "test", "total"} <= set(payload)
+        assert payload["threshold"] == MIN_MEANINGFUL_BLOCK_ROWS
+        assert payload["total"] < MIN_MEANINGFUL_BLOCK_ROWS
+
+    def test_it_reports_but_never_drops(self, splits: _Splits, log_spy: _LogSpy):
+        """
+        Dropping the class it warns about would raise the headline F1-macro by
+        ~0.11 — one of seven classes going from 0.00 to absent — which is
+        improving the number by deleting the evidence for it. Botnet is also a
+        *served* class: ml/flow/fusion.py maps credential_stuffing onto it.
+        """
+        train, val, test = splits
+        before = [len(train), len(val), len(test)]
+
+        support = audit_class_support(train, val, test, FlowConfig())
+
+        assert [len(train), len(val), len(test)] == before
+        assert CICIDS_RARE_CLASS_LABEL in support
+        assert log_spy.names("warning")  # it did warn about it
+
+    def test_the_classes_come_back_in_canonical_order(self, splits: _Splits):
+        support = audit_class_support(*splits, FlowConfig())
+        canonical = [c for c in CLASS_ORDER if c in support]
+        assert list(support) == canonical
+
+    def test_the_floor_setting_travels_with_the_warning(self, splits: _Splits, log_spy: _LogSpy):
+        """
+        A class below the threshold means one thing under strict proportionality
+        and another under a floor that already tried to save it. The log line
+        carries which one it was.
+        """
+        audit_class_support(*splits, FlowConfig(class_sample_floor=2_000))
+
+        payloads = log_spy.payloads("class_support_below_floor")
+        assert payloads and all(p["class_sample_floor"] == 2_000 for p in payloads)
+
+    def test_it_defaults_to_a_plain_config(self, splits: _Splits):
+        assert audit_class_support(*splits) == audit_class_support(*splits, FlowConfig())
 
 
 # ============================================================================

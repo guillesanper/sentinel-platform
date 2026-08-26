@@ -198,8 +198,8 @@ class FlowAnomalyDetector:
         validation sits systematically closer in time to training.
 
         On the reference run the gap is not a rounding detail: Stage 1 recall
-        reads 0.986 on validation and 0.804 on test, i.e. the share of attacks
-        the cascade can never recover goes from 1.4% to 19.6%. Since Stage 1's
+        reads 0.760 on validation and 0.560 on test, i.e. the share of attacks
+        the cascade can never recover goes from 24.0% to 44.0%. Since Stage 1's
         recall is a hard ceiling for the whole cascade, that number has to come
         from held-out data. Use this method for anything reported as a result.
 

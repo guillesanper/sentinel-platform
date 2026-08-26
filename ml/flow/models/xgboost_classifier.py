@@ -22,11 +22,13 @@ from typing import Any, Final
 import joblib
 import numpy as np
 import structlog
+from sklearn.metrics import f1_score, make_scorer
 from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
 from sklearn.preprocessing import LabelEncoder
 from xgboost import XGBClassifier
 
 from ml.flow.config import XGBoostConfig
+from ml.flow.cv import TemporalIndex, temporal_block_folds
 
 logger = structlog.get_logger()
 
@@ -78,33 +80,55 @@ class FlowAttackClassifier:
     # Public API
     # ------------------------------------------------------------------
 
-    def tune_hyperparameters(self, X_train: np.ndarray, y_train: np.ndarray) -> dict[str, Any]:
+    def tune_hyperparameters(
+        self,
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        *,
+        train_index: TemporalIndex | None = None,
+    ) -> dict[str, Any]:
         """
         Search for hyperparameters with ``RandomizedSearchCV``.
 
-        A ``StratifiedKFold`` splitter keeps the attack-class distribution in
-        every fold. The search itself uses no early stopping; :meth:`fit`
-        applies it afterwards on the real validation set.
+        With a ``train_index``, the folds are **chronological within each
+        ``(capture_day, label)`` block** and expand: fold *k* trains on the early
+        chunks and validates on the one right after them, so the search is asked
+        the same question the temporal test set asks. See :mod:`ml.flow.cv` for
+        the scheme and for why a global chronological cut does not work on this
+        dataset. Without one, the folds fall back to a shuffled
+        ``StratifiedKFold`` — which is not temporally clean: it lets
+        near-duplicates from a single attack burst sit on both sides of a fold
+        boundary, and can therefore bias *which* hyperparameters win. It never
+        biases a reported metric; those come from a test set this method never
+        sees.
 
-        **The folds are shuffled, so this search is not temporally clean.**
-        ``X_train`` is already the chronologically early slice of each block, but
-        within it the folds are drawn at random, which lets near-duplicates from
-        one attack burst sit on both sides of a fold boundary — the very leakage
-        ``ml.flow.loader`` partitions to avoid. The consequence is bounded: it
-        can bias *which* hyperparameters win, never the reported metrics, which
-        are measured on a test set this function never sees. Making the folds
-        temporal (``order_idx`` does not reach here) would be the strictly
-        correct thing; it is not done because the reference runs use
-        ``--skip-tuning`` and the gain would be invisible next to the effects
-        documented in ``docs/ml/PARTICION-TEMPORAL.md``.
+        The search itself uses no early stopping; :meth:`fit` applies it
+        afterwards on the real validation set.
 
         Args:
             X_train: Feature matrix of the anomalous training flows.
             y_train: Their canonical string attack labels.
+            train_index: Chronological position and block of each row of
+                ``X_train``, from :func:`ml.flow.loader.build_temporal_index`,
+                narrowed by the same anomaly mask that produced ``X_train``.
 
         Returns:
             The best hyperparameter values found, also stored on the instance
             so that the next :meth:`fit` picks them up.
+
+        Raises:
+            ValueError: ``train_index`` does not describe ``X_train`` row for
+                row. This is a programming error, not a data condition — an
+                index narrowed by a different mask yields perfectly plausible
+                folds and meaningless hyperparameters — so it fails loudly
+                instead of degrading to the shuffled folds.
+
+        Note:
+            ``sample_weight`` is computed once over the whole training set and
+            sklearn slices it per fold. That is deliberate and not a bug: the
+            weight is a property of the class, not of the fold, and recomputing
+            it per fold would make each fold optimise a slightly different
+            objective.
         """
         y_enc = self._fit_and_encode(y_train)
         sample_weight = self._compute_sample_weights(y_enc)
@@ -116,17 +140,13 @@ class FlowAttackClassifier:
             random_state=self.random_seed,
         )
 
-        cv = StratifiedKFold(
-            n_splits=self.config.cv_folds,
-            shuffle=True,
-            random_state=self.random_seed,
-        )
+        cv = self._build_cv(train_index, int(X_train.shape[0]), y_enc)
 
         search = RandomizedSearchCV(
             estimator=base_model,
             param_distributions=self.config.search_space,
             n_iter=self.config.n_iter_search,
-            scoring="f1_macro",
+            scoring=self._macro_f1_scorer(),
             cv=cv,
             # 1, not -1: XGBoost already parallelises internally, and nesting
             # the two thread pools oversubscribes every core.
@@ -141,6 +161,7 @@ class FlowAttackClassifier:
             n_iter=self.config.n_iter_search,
             cv_folds=self.config.cv_folds,
             n_samples=int(X_train.shape[0]),
+            temporal_folds=train_index is not None,
         )
         search.fit(X_train, y_enc, sample_weight=sample_weight)
 
@@ -370,6 +391,136 @@ class FlowAttackClassifier:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _build_cv(
+        self,
+        train_index: TemporalIndex | None,
+        n_rows: int,
+        y_enc: np.ndarray,
+    ) -> Any:
+        """
+        Pick the cross-validation splitter for the search.
+
+        Returns the chronological folds of :mod:`ml.flow.cv` when the caller
+        supplied an index that survives the guardrails, and a shuffled
+        ``StratifiedKFold`` otherwise. A fallback taken *despite* an index having
+        arrived is warned about here — a search that silently stopped being
+        temporal would look exactly like one that never was. The other case, no
+        index at all, is reported by
+        :meth:`~ml.flow.pipelines.cascade_xgb.CascadeXGBPipeline._report_fold_protocol`,
+        which is the only place that also knows whether the run claimed a
+        temporal protocol.
+
+        Args:
+            train_index: Index over the training rows, or None.
+            n_rows: Rows of the training matrix, for the alignment check.
+            y_enc: Integer-encoded training labels, used to reject folds whose
+                training half holds a single class.
+
+        Returns:
+            A list of ``(train, val)`` position pairs, or a ``StratifiedKFold``.
+
+        Raises:
+            ValueError: ``train_index`` has a different length than ``n_rows``.
+        """
+        if train_index is None:
+            return self._shuffled_folds()
+
+        if len(train_index) != n_rows:
+            raise ValueError(
+                f"train_index describes {len(train_index)} rows but X_train has {n_rows}. "
+                "The index must be narrowed with the same mask that selected the rows — "
+                "see ml.flow.cv.TemporalIndex."
+            )
+
+        folds = temporal_block_folds(train_index, self.config.cv_folds)
+        usable = [(train, val) for train, val in folds if train.size and val.size]
+
+        if len(usable) < len(folds):
+            logger.warning(
+                "xgb_tuning_temporal_fold_dropped",
+                n_dropped=len(folds) - len(usable),
+                hint="a chunk of every block came back empty; too few rows per block",
+            )
+
+        if len(usable) < 2:
+            logger.warning(
+                "xgb_tuning_temporal_folds_degenerate",
+                reason="fewer_than_two_usable_folds",
+                n_usable=len(usable),
+                cv_folds=self.config.cv_folds,
+            )
+            return self._shuffled_folds()
+
+        # A single-class training half sends the booster down the
+        # binary:logistic branch of _objective_params with one label, which is
+        # not a model. Falling back wholesale, rather than dropping the fold,
+        # keeps every candidate scored on the same folds.
+        single_class = [
+            i for i, (train, _) in enumerate(usable) if np.unique(y_enc[train]).size < 2
+        ]
+        if single_class:
+            logger.warning(
+                "xgb_tuning_temporal_folds_degenerate",
+                reason="fold_train_has_one_class",
+                folds=single_class,
+            )
+            return self._shuffled_folds()
+
+        # The tuning's counterpart of split_sublabel_distribution: without these
+        # sizes, a fold set that quietly collapsed is indistinguishable from a
+        # healthy one in a run log.
+        logger.info(
+            "xgb_tuning_temporal_folds",
+            n_folds=len(usable),
+            train_sizes=[int(train.size) for train, _ in usable],
+            val_sizes=[int(val.size) for _, val in usable],
+            train_classes=[int(np.unique(y_enc[train]).size) for train, _ in usable],
+            val_classes=[int(np.unique(y_enc[val]).size) for _, val in usable],
+            n_classes=self._n_classes,
+        )
+        return usable
+
+    def _shuffled_folds(self) -> StratifiedKFold:
+        """
+        The pre-temporal splitter, kept as the fallback.
+
+        Stratified so every fold holds every attack class, shuffled so the folds
+        do not follow the row order — which is what makes it *not* temporally
+        clean, and why it is only ever reached through an announced fallback.
+        """
+        return StratifiedKFold(
+            n_splits=self.config.cv_folds,
+            shuffle=True,
+            random_state=self.random_seed,
+        )
+
+    def _macro_f1_scorer(self) -> Any:
+        """
+        Macro F1 averaged over a fixed class set, not over whatever a fold saw.
+
+        ``scoring="f1_macro"`` averages over ``union(y_true, y_pred)`` **of that
+        fold**. Under the old shuffled folds that was harmless — stratification
+        put every class in every fold. Under chronological folds a class missing
+        from one validation chunk goes from impossible to routine, and then the
+        set being averaged over changes from fold to fold *and from candidate to
+        candidate*, so the search's scores stop being comparable and the winner
+        is partly an artifact of which classes each candidate happened to
+        predict.
+
+        Pinning ``labels`` to every encoded class is the same correction that
+        :meth:`ml.flow.pipelines.base.BaseCascadePipeline.evaluate` applies to
+        the headline F1-macro, one level further down.
+
+        Must be called after :meth:`_fit_and_encode`, which is what fixes
+        ``_n_classes``.
+        """
+        return make_scorer(
+            f1_score,
+            average="macro",
+            labels=np.arange(self._n_classes),
+            zero_division=0,
+        )
+
     def _fit_and_encode(self, y: np.ndarray) -> np.ndarray:
         """
         Fit the label encoder on first use and return integer-encoded labels.
@@ -377,6 +528,10 @@ class FlowAttackClassifier:
         Fitted once and only once: :meth:`tune_hyperparameters` and :meth:`fit`
         both call this, and a re-fit between them would renumber the classes
         under the tuned parameters.
+
+        It also runs *before* the cross-validation folds are built, on the whole
+        routed training set, so every fold — and the fixed-class scorer in
+        :meth:`_macro_f1_scorer` — shares one encoding.
         """
         if not self._encoder_fitted:
             self._label_encoder.fit(y)

@@ -84,13 +84,23 @@ F1 por clase:
 ### B) Medido en este repo — split **temporal**, sin tuning
 
 Ese sesgo es exactamente lo que corrige el track de flujos de sentinel. Mismo comando salvo el
-`--split`, `--sample-size 200000`, `--pipeline xgb --skip-tuning`:
+`--split`, `--sample-size 200000`, `--pipeline xgb --skip-tuning`, medido el **22 de agosto de
+2026** sobre los CSV reales:
 
 | Split | Accuracy | F1-macro | F1-weighted | Stage 1 P / R / FPR (test) |
 |---|---|---|---|---|
-| `random` | 0.9944 | **0.9197** | 0.9945 | 0.251 / 0.979 / 0.593 |
-| `temporal --temporal-block sub-label` *(default)* | 0.9612 | **0.7721** | 0.9597 | 0.250 / **0.804** / 0.491 |
-| `temporal --temporal-block class` | 0.8807 | **0.2973** | 0.8483 | 0.679 / **0.393** / 0.038 |
+| `random` | 0.9944 | **0.9453** | 0.9945 | 0.250 / **0.976** / 0.596 |
+| `temporal --temporal-block sub-label` *(default)* | 0.9194 | **0.6467** | 0.9052 | 0.335 / **0.560** / 0.226 |
+| `temporal --temporal-block class` | 0.9165 | **0.6547** | 0.8999 | 0.329 / **0.573** / 0.237 |
+
+Y el mismo default con el suelo de muestreo activado (`--class-sample-floor 2000`), que **no es la
+línea base** porque mueve el punto de operación de Stage 1 — ver el párrafo de Botnet más abajo:
+
+| Split | Accuracy | F1-macro | F1-weighted | Stage 1 P / R / FPR (test) |
+|---|---|---|---|---|
+| `random` | 0.9939 | 0.9837 | 0.9938 | 0.276 / 0.974 / 0.596 |
+| `temporal --temporal-block sub-label` | 0.9525 | **0.7893** | 0.9462 | 0.293 / **0.819** / 0.463 |
+| `temporal --temporal-block class` | 0.9438 | 0.7631 | 0.9362 | 0.294 / 0.817 / 0.459 |
 
 > Las cifras de Stage 1 están medidas **sobre test**. Hasta la revisión del 8 de agosto de 2026 esta
 > columna traía las de **validación** —el conjunto sobre el que la búsqueda F-beta *elige* el
@@ -99,63 +109,96 @@ Ese sesgo es exactamente lo que corrige el track de flujos de sentinel. Mismo co
 
 F1 por clase, con el número de herramientas de ataque que compone cada una:
 
-| Clase | Herram. | `random` | `sub-label` | `class` |
-|---|---|---|---|---|
-| BENIGN | — | 1.00 | 0.98 | 0.94 |
-| Botnet | 1 | 0.54 | **0.00** | **0.00** |
-| BruteForce | 2 | 0.98 | 0.98 | **0.00** |
-| DDoS | 1 | 0.99 | 0.98 | 0.63 |
-| DoS | 5 | 0.98 | 0.84 | 0.44 |
-| Scan | 1 | 0.99 | 0.80 | 0.01 |
-| WebAttack | 3 | 0.96 | 0.83 | 0.06 |
+| Clase | Herram. | `random` | `sub-label` | `class` | S1 recall bajo `sub-label` |
+|---|---|---|---|---|---|
+| BENIGN | — | 0.997 | 0.954 | 0.952 | 0.226 *(es FPR)* |
+| Botnet | 1 | 0.708 | **0.000** | **0.000** | **0.000** |
+| BruteForce | 2 | 0.968 | 0.934 | 0.969 | 0.973 |
+| DDoS | 1 | 0.993 | 0.886 | 0.893 | 0.796 |
+| DoS | 5 | 0.976 | 0.732 | 0.653 | 0.594 |
+| Scan | 1 | 0.995 | **0.201** | **0.244** | **0.113** |
+| WebAttack | 3 | 0.981 | 0.820 | 0.873 | 0.962 |
+
+La última columna es la que hace legible el resto: **el F1 de Stage 2 solo se mide sobre las filas
+que Stage 1 dejó pasar.** El 0.201 de `Scan` no dice que el clasificador no sepa nombrar un
+PortScan; dice que Stage 1 le entrega 122 de sus 1.080 flujos de test.
 
 Las tres filas son el **mismo dataset y la misma garantía cronológica**; lo único que cambia entre
-las dos últimas es qué define un bloque temporal. Eso permite descomponer la caída en vez de
-atribuirla entera a una sola causa:
+las dos últimas es qué define un bloque temporal. Ese diseño se montó para poder descomponer la
+caída en vez de atribuirla entera a una sola causa, y merece la pena ver qué ha dado la
+descomposición en cada medición:
 
 ```
+Agosto 2026, con order_idx derivado del orden alfabético de los ficheros
 F1-macro   random 0.9197  →  sub-label 0.7721  →  class 0.2973
            └──── 0.1476 ────┘└──────── 0.4748 ────────┘
               fuga (23,7 %)    artefacto taxonomía × tiempo (76,3 %)
+
+Re-medido con order_idx en orden de captura real
+F1-macro   random 0.9453  →  sub-label 0.6467  →  class 0.6547
+           └──── 0.2986 ────┘└──────── −0.0080 ────────┘
+             protocolo         artefacto ya no medible
 ```
 
-**La fuga por casi-duplicados vale 0.148 de F1-macro.** Los otros 0.475 los produce el bloqueo por
-clase canónica: `ATTACK_GROUPS` colapsa herramientas que corrieron **en serie** dentro del mismo
-día, así que cortar por posición dentro de la clase holdea herramientas enteras (el test de
-`tuesday/BruteForce` es 100 % SSH-Patator; el 35 % del test de `wednesday/DoS` es GoldenEye y
-Heartbleed, ausentes de train). Es una pregunta legítima —generalizar a una herramienta no vista—
-pero es otra, y solo se les plantea a las clases que tienen varias herramientas.
+**La descomposición de agosto no sobrevive a la re-medición.** El artefacto de taxonomía nunca fue
+un efecto directo sobre Stage 2: su vía era el umbral compartido de Stage 1, y con el orden de
+captura corregido los dos protocolos aterrizan en umbrales casi iguales (recall de Stage 1 0.560 y
+0.573), de modo que el efecto desaparece — `class` queda incluso 0.008 por encima. Lo que sí sigue
+siendo cierto es el hecho del dataset: bajo `class`, el test de `tuesday/BruteForce` es 100 %
+SSH-Patator y el 35 % del de `wednesday/DoS` es GoldenEye y Heartbleed, ausentes de train. Lo que ya
+no se sostiene es que eso costara 0.475 de F1-macro; `BruteForce` puntúa hoy **mejor** bajo `class`
+(0.969) que bajo `sub-label` (0.934).
 
-> Una versión anterior de este documento afirmaba que la caída a 0.2809 «es la magnitud de la
-> fuga». Se equivocaba por un factor de ~4. El registro completo del error, la descomposición y el
-> arreglo están en **[PARTICION-TEMPORAL.md](PARTICION-TEMPORAL.md)**.
+Queda la diferencia entre el protocolo aleatorio y el temporal, **0.2986 de F1-macro**, y llamarla
+«fuga» sin más sería repetir el error con otro número: la columna de recall de Stage 1 de la tabla
+por clase muestra que buena parte se paga antes de que Stage 2 opine. Bajo split aleatorio Stage 1
+marca ≥ 0.95 de cada clase de ataque; bajo el temporal marca 0.11 de `Scan` y 0.00 de `Botnet`.
 
-El 0.9197 es el equivalente sin tuning del 0.9516 publicado — la fila `random` de esta tabla y la
-tabla (A) miden lo mismo, así que la comparación honesta con el TFA es 0.9197 → 0.7721.
+> Dos versiones anteriores de este documento se equivocaron aquí, y las dos están registradas en
+> **[PARTICION-TEMPORAL.md](PARTICION-TEMPORAL.md)**: la primera presentó la caída a 0.2809 como «la
+> magnitud de la fuga» (error de factor ~4); la segunda midió esa descomposición con un `order_idx`
+> que ordenaba los ficheros alfabéticamente en lugar de por hora de captura. El experimento de
+> control —código actual, orden alfabético restaurado— reproduce exactamente las cifras de agosto,
+> así que el movimiento tiene una sola causa y está aislada.
 
-Mecanismo de la caída bajo `--temporal-block class`, en orden. Son síntomas correctos, todos aguas
-abajo de la clave de bloqueo:
+El 0.9453 es el equivalente sin tuning del 0.9516 publicado — la fila `random` de esta tabla y la
+tabla (A) miden lo mismo, así que la comparación honesta con el TFA es 0.9453 → 0.6467.
 
-1. La composición de validación la fija la clave del bloque. Bajo `class`, la búsqueda F-beta elige
-   un umbral de Stage 1 **mucho más conservador**: FPR cae de 0.491 a 0.038, pero el recall cae de
-   0.804 a 0.393.
-2. Stage 1 deja fuera el **61 % de los ataques**, y esos **nunca llegan a Stage 2**. Ningún acierto
-   de Stage 2 puede recuperarlos.
-3. Bajo `class`, **BruteForce ni siquiera llega a entrenar Stage 2**: el clasificador se entrena con
-   **6 clases** sobre 26.678 filas. Bajo `sub-label` son **7 clases** sobre 93.142.
+El mecanismo que gobierna todas estas cifras es **el punto de operación único de Stage 1**. Es un
+solo umbral para las siete clases, elegido maximizando F-beta sobre validación, y cualquier cosa que
+cambie la composición de validación lo mueve: la clave del bloque (lo que se midió en agosto), el
+orden de lectura de los ficheros, y el suelo de muestreo. Lo que Stage 1 no marca sale como BENIGN
+sin que Stage 2 lo vea, así que su recall es el techo duro del sistema: bajo el default actual, el
+**44,0 %** de los ataques es irrecuperable por construcción, y con el suelo activado el 18,1 %.
 
-Ese umbral es único para todas las clases, así que el efecto no se queda en las clases
-multi-herramienta: `Scan` y `DDoS` tienen una sola herramienta —su bloque se parte idénticamente
-bajo ambas claves— y aun así caen a 0.01 y 0.63. En una cascada, contaminar la validación de tres
-clases mueve el punto de operación de las siete.
-
-**El punto débil real del diseño** es otro y sigue en pie: **Botnet cae 0.54 → 0.00 en los dos
+**El punto débil real del diseño** es otro y sigue en pie: **Botnet cae 0.71 → 0.00 en los dos
 protocolos temporales.** Tiene una sola sub-etiqueta y un solo día, así que su bloque se parte
-idénticamente bajo ambas claves y no cabe confundirlo con una demanda de novedad: ese 0.54 era
-memorización pura de ráfagas. Con ~1.950 flujos en el dataset completo, concentrados en un único
-día, la muestra de 200k le deja 108 filas de entrenamiento y 24 de test: la clase no se aprende.
-WebAttack, igual de minoritaria pero con tres herramientas, sí sobrevive al protocolo honesto
-(0.83), lo que sitúa el problema de Botnet en el soporte y no en el protocolo.
+idénticamente bajo ambas claves y no cabe confundirlo con una demanda de novedad: ese 0.71 era
+memorización pura de ráfagas.
+
+Hasta agosto la explicación se detenía en el soporte —con la muestra de 200k la clase se queda en
+108 filas de entrenamiento y 24 de test, y sobre 24 filas 0.00 y 0.50 son la misma medida— y esa
+objeción ya no aplica, porque `--class-sample-floor 2000` la desactiva:
+
+| Run | Botnet train | Botnet test | S1 recall en Botnet | **F1 de Stage 2 en Botnet** |
+|---|---|---|---|---|
+| `sub-label`, sin suelo | 108 | 24 | **0.000** | 0.000 |
+| `sub-label`, suelo 2.000 | 1.363 | 293 | **1.000** | **0.000** |
+| `random`, suelo 2.000 | 1.364 | 292 | 1.000 | 0.973 |
+
+Con las 1.948 filas que la clase tiene, con Stage 1 entregándole el 100 % del test y con 12,6× más
+datos de entrenamiento, **Stage 2 sigue en 0.00 bajo el protocolo temporal y en 0.97 bajo el
+aleatorio, con el mismo muestreo y el mismo volumen**. Lo que falta no es soporte: es que un botnet capturado un solo
+día con una sola herramienta, cortado cronológicamente, no deja nada transferible del primer 70 % al
+último 15 %. El suelo no arregla Botnet; retira la única objeción metodológica al 0.00.
+
+> **El suelo sube el titular (0.6467 → 0.7893) y no es por Botnet.** `Scan` pasa de 0.201 a 0.792,
+> `DDoS` de 0.886 a 0.956 y `DoS` de 0.732 a 0.847 — **con menos filas de entrenamiento que antes**,
+> porque el suelo se las quita para pagar las de las clases raras. Lo que las mejora es que las
+> 4.897 filas de ataque añadidas (2,45 % de la muestra, restadas sobre todo a BENIGN) mueven el
+> ratio BENIGN:ataque que ve la búsqueda F-beta, el umbral
+> sube de 0.0655 a 0.0885 y el recall de Stage 1 de 0.560 a 0.819. Es un cambio del punto de
+> operación disfrazado de opción de muestreo, y por eso viene **desactivado por defecto**.
 
 ### El punto de operación de Stage 1: medirlo donde se elige no es medirlo
 
@@ -165,16 +208,16 @@ presentada como si respondiera a otra pregunta.**
 El umbral del Isolation Forest se elige maximizando F-beta sobre validación. `optimize_threshold`
 dejaba anotado el punto de operación **de ese mismo conjunto**, y `evaluate()` lo copiaba dentro del
 dict de métricas de test, junto a `accuracy` y `f1_macro`, que sí eran de test. Un lector del
-`training_summary.json` —o de la tabla de arriba— leía `if_recall = 0.986` como una propiedad del
-modelo sobre tráfico no visto. No lo era.
+`training_summary.json` —o de la tabla de arriba— leía `if_recall = 0.986` (la cifra de validación
+de entonces) como una propiedad del modelo sobre tráfico no visto. No lo era.
 
 Medido con el umbral congelado sobre los dos conjuntos:
 
 | Protocolo | S1 recall (validación) | S1 recall (test) | Δ |
 |---|---|---|---|
-| `random` | 0.978 | 0.979 | **+0.001** |
-| `temporal` + `sub-label` | 0.986 | **0.804** | **−0.182** |
-| `temporal` + `class` | 0.626 | **0.393** | **−0.233** |
+| `random` | 0.975 | 0.976 | **+0.001** |
+| `temporal` + `sub-label` | 0.760 | **0.560** | **−0.200** |
+| `temporal` + `class` | 0.770 | **0.573** | **−0.197** |
 
 **Bajo split aleatorio el hueco es cero.** Eso es lo que identifica la causa. Si el problema fuera
 el sesgo de selección —el umbral es el argmax de F-beta sobre los puntos de operación de ese
@@ -186,11 +229,12 @@ sustituir uno por otro no cuesta nada; en cuanto dejan de serlo, la sustitución
 
 La consecuencia práctica es la peor posible para un IDS en cascada. Lo que Stage 1 no marca **nunca
 llega a Stage 2** y sale como BENIGN: su recall es un techo duro para el sistema entero. La fracción
-de ataques irrecuperables no era el 1,4 % publicado sino el **19,6 %** — un factor de 14.
+de ataques irrecuperables no era el 1,4 % publicado sino el 19,6 % cuando esto se midió — y con el
+orden de captura corregido, el **44,0 %**.
 
-Ninguna métrica end-to-end se mueve: `accuracy`, `f1_macro` y `f1_weighted` siempre salieron de
-`predict(X_test)`. La descomposición 0.9197 → 0.7721 → 0.2973 se sostiene entera. Lo que cambia es
-la columna de Stage 1 y la afirmación de cuántos ataques se pierden por el camino.
+Ninguna métrica end-to-end se movió *por este arreglo*: `accuracy`, `f1_macro` y `f1_weighted`
+siempre salieron de `predict(X_test)`. Lo que cambió fue la columna de Stage 1 y la afirmación de
+cuántos ataques se pierden por el camino.
 
 `training_summary.json` registra ahora los dos puntos, etiquetados y sin posibilidad de confundirlos:
 

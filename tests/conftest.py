@@ -274,6 +274,21 @@ CICIDS_MINI_LEAD_IN: int = 120
 CICIDS_MINI_ATTACK: int = 240
 CICIDS_MINI_TAIL: int = 120
 
+# The sixth file, used **only** by ``cicids_rare_class_csv``. Friday morning is
+# where the real Bot capture lives, and CAPTURE_FILE_ORDER puts it before the two
+# Friday afternoon files, so the rare block also lands in the middle of the
+# capture week rather than at its end.
+CICIDS_RARE_CLASS_FILE: str = "Friday-WorkingHours-Morning.pcap_ISCX.csv"
+CICIDS_RARE_CLASS_RAW_LABEL: str = "Bot"
+CICIDS_RARE_CLASS_LABEL: str = "Botnet"
+
+# Deliberately between the two thresholds that matter. Above
+# FlowConfig.min_class_samples (100), so filter_minority_classes keeps the
+# class — the real Botnet survives that filter too. Far below
+# ml.flow.loader.MIN_MEANINGFUL_BLOCK_ROWS (2.000), so a proportional draw
+# grinds it down to a handful of rows and the support audit reports it.
+CICIDS_RARE_CLASS_ATTACK: int = 120
+
 
 def _write_cicids_mini_csv(
     path: Path,
@@ -281,6 +296,7 @@ def _write_cicids_mini_csv(
     *,
     seed: int,
     inject_artifacts: bool,
+    attack_rows: int | None = None,
 ) -> None:
     """
     Write one synthetic CICIDS2017-shaped CSV with a temporal structure.
@@ -288,6 +304,11 @@ def _write_cicids_mini_csv(
     The attack window is divided evenly among ``raw_labels`` and the parts are
     laid down **in the given order**, so a file with two labels reproduces the
     real "tool A, then tool B" sequence within a single capture day.
+
+    ``attack_rows`` overrides the width of that window; ``None`` keeps
+    :data:`CICIDS_MINI_ATTACK`, so every existing caller writes exactly the file
+    it wrote before. A narrow window is how ``cicids_rare_class_csv`` builds a
+    class small enough to be sampled into noise.
     """
     rng = np.random.default_rng(seed)
 
@@ -299,7 +320,8 @@ def _write_cicids_mini_csv(
             "Label": [label] * n,
         }
 
-    per_label = CICIDS_MINI_ATTACK // len(raw_labels)
+    n_attack = CICIDS_MINI_ATTACK if attack_rows is None else attack_rows
+    per_label = n_attack // len(raw_labels)
     frames = [pd.DataFrame(block(CICIDS_MINI_LEAD_IN, "BENIGN", 100.0))]
     for i, raw_label in enumerate(raw_labels):
         # Each tool gets its own feature centre: two tools of the same family are
@@ -348,6 +370,49 @@ def cicids_mini_csv(tmp_path: Path) -> Path:
             seed=1000 + seed,
             inject_artifacts=(seed == 0),
         )
+
+    return data_dir
+
+
+@pytest.fixture
+def cicids_rare_class_csv(tmp_path: Path) -> Path:
+    """
+    The mini dataset plus one deliberately tiny attack class, and its directory.
+
+    Reproduces the Botnet problem in miniature. In the real captures Botnet is
+    one sub-label (``Bot``), one day, ~1.966 rows out of ~2.8M; it clears
+    ``min_class_samples`` comfortably and is then destroyed by the sampler,
+    because strictly proportional sampling at ``--sample-size 200000`` keeps
+    ~155 of those rows and the split leaves ~24 in test. The published F1 of
+    0.00 for that class is measured on those 24 rows.
+
+    So this fixture writes the five :data:`CICIDS_MINI_FILES` unchanged plus a
+    sixth with a :data:`CICIDS_RARE_CLASS_ATTACK`-row ``Bot`` window. It is a
+    **separate** fixture rather than a sixth entry in ``CICIDS_MINI_FILES``: the
+    loader, split and pipeline tests assert exact class sets and split sizes
+    against that tuple, and a ~40-row class may not survive Stage 1's routing at
+    all, which would turn tests about other things flaky.
+
+    Used by the ``class_sample_floor`` and ``audit_class_support`` tests.
+    """
+    data_dir = tmp_path / "cicids-rare-class"
+    data_dir.mkdir()
+
+    for seed, (filename, raw_labels) in enumerate(CICIDS_MINI_FILES):
+        _write_cicids_mini_csv(
+            data_dir / filename,
+            raw_labels,
+            seed=1000 + seed,
+            inject_artifacts=(seed == 0),
+        )
+
+    _write_cicids_mini_csv(
+        data_dir / CICIDS_RARE_CLASS_FILE,
+        (CICIDS_RARE_CLASS_RAW_LABEL,),
+        seed=1000 + len(CICIDS_MINI_FILES),
+        inject_artifacts=False,
+        attack_rows=CICIDS_RARE_CLASS_ATTACK,
+    )
 
     return data_dir
 

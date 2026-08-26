@@ -14,8 +14,11 @@ from ml.flow.labels import (
     BENIGN_LABEL,
     CAPTURE_DAY_ORDER,
     CAPTURE_DAYS,
+    CAPTURE_FILE_ORDER,
     CLASS_ORDER,
     UNKNOWN_CAPTURE_DAY,
+    UNKNOWN_CAPTURE_FILE_RANK,
+    capture_file_rank,
     map_capture_day,
     map_label,
 )
@@ -206,3 +209,75 @@ class TestMapCaptureDay:
 
     def test_unknown_sentinel_is_not_a_weekday(self):
         assert UNKNOWN_CAPTURE_DAY not in CAPTURE_DAY_ORDER
+
+
+# ============================================================================
+# capture_file_rank
+# ============================================================================
+
+
+class TestCaptureFileRank:
+    """
+    CSV filename → position in the capture week.
+
+    Exists because the filenames do not sort chronologically, and ``order_idx``
+    is a counter over the loader's reading order.
+    """
+
+    def test_capture_file_order_covers_exactly_the_known_filenames(self):
+        """
+        A file present in one table and missing from the other is the failure
+        mode: it would keep a capture day but lose its place in the week.
+        """
+        assert set(CAPTURE_FILE_ORDER) == set(CAPTURE_DAYS)
+        assert len(CAPTURE_FILE_ORDER) == len(CAPTURE_DAYS)
+
+    def test_ranks_are_a_permutation_of_range(self):
+        ranks = [capture_file_rank(name) for name in CAPTURE_FILE_ORDER]
+        assert ranks == list(range(len(CAPTURE_FILE_ORDER)))
+
+    def test_the_days_are_ranked_in_weekday_order(self):
+        days = [map_capture_day(name) for name in CAPTURE_FILE_ORDER]
+        assert days == sorted(days, key=CAPTURE_DAY_ORDER.index)
+
+    def test_morning_captures_rank_before_afternoon_ones(self):
+        """
+        The whole point: alphabetically 'Afternoon' precedes 'Morning', so a
+        sorted glob inverts both Thursday and Friday.
+        """
+        assert capture_file_rank(
+            "Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv"
+        ) < capture_file_rank("Thursday-WorkingHours-Afternoon-Infilteration.pcap_ISCX.csv")
+        assert capture_file_rank("Friday-WorkingHours-Morning.pcap_ISCX.csv") < capture_file_rank(
+            "Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv"
+        )
+
+    def test_the_two_friday_afternoon_captures_keep_their_recorded_order(self):
+        assert capture_file_rank(
+            "Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv"
+        ) < capture_file_rank("Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv")
+
+    def test_is_case_insensitive(self):
+        assert capture_file_rank("MONDAY-WORKINGHOURS.PCAP_ISCX.CSV") == capture_file_rank(
+            "Monday-WorkingHours.pcap_ISCX.csv"
+        )
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/data/cicids2017/Friday-WorkingHours-Morning.pcap_ISCX.csv",
+            r"C:\data\cicids2017\Friday-WorkingHours-Morning.pcap_ISCX.csv",
+        ],
+    )
+    def test_accepts_a_full_path(self, path):
+        assert capture_file_rank(path) == capture_file_rank(
+            "Friday-WorkingHours-Morning.pcap_ISCX.csv"
+        )
+
+    @pytest.mark.parametrize(
+        "filename",
+        ["random.csv", "Friday-generated-20000rows.csv", "Saturday-WorkingHours.csv", ""],
+    )
+    def test_unrecognised_filenames_rank_last(self, filename):
+        assert capture_file_rank(filename) == UNKNOWN_CAPTURE_FILE_RANK
+        assert all(capture_file_rank(known) < capture_file_rank(filename) for known in CAPTURE_DAYS)

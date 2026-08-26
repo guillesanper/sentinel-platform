@@ -102,15 +102,49 @@ La estratificación en ambos pasos garantiza que la distribución de clases en c
 
 ---
 
-### `stratified_sample(df: pd.DataFrame, config: Config = cfg) -> pd.DataFrame`
+### `stratified_sample(df: pd.DataFrame, config: FlowConfig | None = None) -> pd.DataFrame`
 
-**Descripción:** Extrae una muestra estratificada de tamaño `config.SAMPLE_SIZE`. Si el dataset es igual o más pequeño que `SAMPLE_SIZE`, o si `SAMPLE_SIZE == 0`, devuelve el DataFrame sin modificar.
+**Descripción:** Extrae una muestra estratificada de tamaño `config.sample_size`. Si el dataset es igual o más pequeño que `sample_size`, o si `sample_size == 0`, devuelve el DataFrame sin modificar. La función tiene **dos caminos de asignación distintos**, elegidos por `config.class_sample_floor`, y no son un parche uno del otro.
 
 **Parámetros:**
 - `df` — DataFrame filtrado con columna `Label`
-- `config` — instancia de configuración con `SAMPLE_SIZE` y `RANDOM_SEED`
+- `config` — instancia de `FlowConfig`; lee `sample_size`, `class_sample_floor` y `random_seed`. Por defecto `FlowConfig()`
 
-**Retorna:** DataFrame muestreado (o el original), mezclado y con índice reseteado.
+**Retorna:** DataFrame muestreado (o el original), mezclado y con índice reseteado. La mezcla solo toca el orden de las filas: `order_idx` sobrevive como columna, así que una partición temporal aguas abajo sigue siendo exacta.
+
+**Camino proporcional (`class_sample_floor == 0`, el default):** `groupby(Label).sample(frac=S/N)` y un relleno estratificado (`_proportional_topup`) del déficit que deja el redondeo por clase. Es estrictamente proporcional y **es lo que reproduce los runs publicados**. Nota de precisión: el redondeo por clase hace que el total devuelto pueda no ser exactamente `sample_size` (con `--sample-size 200000` sobre CICIDS2017 devuelve 200.001).
+
+**Camino con suelo (`class_sample_floor > 0`):** `_floored_sample` → `_class_quotas` calcula **cuotas enteras exactas antes de muestrear**, de modo que no queda déficit que rellenar y el total es exactamente `sample_size`. Cada clase se lleva el suelo o todas las filas que tiene; el presupuesto restante se reparte proporcionalmente por el método del **resto mayor** (`_largest_remainder`). Si la suma de los suelos no cabe en `sample_size`, se avisa (`class_sample_floor_unaffordable`) y se degrada en vez de rebasar en silencio. `_proportional_topup` **no** se usa aquí: tira de `df.drop(sampled.index)` sobre todas las clases a la vez y podría dar filas extra a una clase que ya está en su suelo.
+
+**Por qué el suelo es opt-in.** Levantar una clase rara cambia el ratio BENIGN:ataque que ve la búsqueda F-beta del umbral de Stage 1, y ese umbral es **único para las siete clases**. Medido con `--class-sample-floor 2000`: Botnet pasa de 155 a 1.948 filas y su F1 no se mueve (0.00), mientras `Scan` sube de 0.201 a 0.792 **con menos filas de entrenamiento que antes**. El suelo mueve las métricas de las clases que no toca. Ver [PARTICION-TEMPORAL.md §5](../PARTICION-TEMPORAL.md).
+
+**Eventos:** `stratified_sample_skipped`, `stratified_sample_drawn` (camino proporcional), `stratified_sample_drawn_with_floor`, `class_sample_floor_unaffordable`.
+
+---
+
+### `audit_class_support(train, val, test, config=None) -> dict[str, dict[str, int]]`
+
+**Descripción:** Cuenta cada clase en cada split y **reporta** —nunca descarta— las que quedan por debajo de `MIN_MEANINGFUL_BLOCK_ROWS`. Corre **después** de la partición, no antes: el muestreo decide cuántas filas tiene una clase, pero es la partición la que decide cuántas quedan para test, y ése es el número del que sale un F1 por clase.
+
+**Parámetros:**
+- `train`, `val`, `test` — los tres splits, con columna `Label`
+- `config` — `FlowConfig`; se lee `class_sample_floor` para dejar registrado en el log si el suelo estaba activo cuando se contaron
+
+**Retorna:** `{clase: {"train": n, "val": n, "test": n, "total": n}}` en orden canónico. Se persiste en `training_summary.json` bajo la clave de primer nivel `class_support`.
+
+**Notas:** No filtra nunca, y la contención es el punto. Descartar Botnet subiría el F1-macro titular de 0.6467 a 0.7545 —una de siete clases pasando de 0.00 a ausente, +0.108— es decir, mejorar el número borrando la evidencia. Además es una afirmación operativa y no solo de reporte: `ml.flow.fusion` mapea `credential_stuffing` sobre Botnet, así que es una clase **servida**.
+
+**Eventos:** `class_support_below_floor` (WARNING, una línea por clase con sus tres conteos), `class_support_audited`.
+
+---
+
+### Constantes públicas relevantes
+
+| Constante | Valor | Uso |
+|---|---|---|
+| `MIN_MEANINGFUL_BLOCK_ROWS` | `2000` | El suelo práctico por debajo del cual un F1 por clase deja de ser medible. Antes era el privado `_SMALL_BLOCK_ROWS`, usado solo para avisar en el corte temporal; se promovió al hacerse umbral de `audit_class_support` y valor citado por el `--help` de `--class-sample-floor` |
+| `CAPTURE_FILE_ORDER` / `capture_file_rank()` | en `ml.flow.labels` | Orden real de captura de los ocho CSV. El loader ordena por `(capture_file_rank(nombre), nombre)`, **no** alfabéticamente, para que `order_idx` sea cronológico también entre ficheros |
+| `block_boundaries(n, ratios)` | — | Fronteras estrictamente crecientes de un bloque; si `n < n_partes`, todo va al primer trozo. Público para que `ml/flow/cv.py` corte los folds del tuning con la misma regla que la partición |
 
 ---
 

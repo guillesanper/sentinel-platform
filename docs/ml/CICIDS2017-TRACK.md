@@ -148,8 +148,12 @@ Las 15 etiquetas crudas de CICIDS2017 se colapsan a las 8 canónicas en
 > **El colapso es información que la partición necesita.** `ATTACK_GROUPS` junta herramientas que
 > corrieron **en serie** dentro del mismo día, así que un corte cronológico sobre la clase colapsada
 > holdea herramientas enteras. Por eso el loader conserva la etiqueta cruda en `raw_label` y la
-> clave del bloque es configurable (`--temporal-block`). Cuesta 0.475 de F1-macro confundir las dos
-> cosas: [PARTICION-TEMPORAL.md](PARTICION-TEMPORAL.md).
+> clave del bloque es configurable (`--temporal-block`). En agosto de 2026 confundir las dos cosas
+> costaba 0.475 de F1-macro; re-medido con `order_idx` en orden de captura, el efecto sobre el
+> titular ya no es medible (0.6547 bajo `class` contra 0.6467 bajo `sub-label`), porque su vía era
+> el umbral compartido de Stage 1 y ése ya no se dispara. El holdout de herramienta sigue ahí como
+> hecho del dataset; lo que cambió es lo que cuesta. Registro completo, con el experimento de
+> control: [PARTICION-TEMPORAL.md](PARTICION-TEMPORAL.md).
 
 > **Trampa de encoding.** Las tres etiquetas `Web Attack` del CSV crudo contienen un **EN DASH**
 > (U+2013) que llega mojibakeado como `ï¿½` por una lectura latin-1 previa. `map_label()` repara
@@ -262,7 +266,10 @@ Implementación en [`ml/flow/loader.py`](../../ml/flow/loader.py):
 
 Cinco detalles del comportamiento que sorprenden si no se conocen:
 
-1. **`order_idx` es un contador global**, no una posición por fichero.
+1. **`order_idx` es un contador global**, no una posición por fichero, y los ficheros se leen en
+   **orden de captura** (`CAPTURE_FILE_ORDER` en `ml/flow/labels.py`), no alfabético: por nombre,
+   las capturas de tarde de jueves y viernes irían **antes** que las de mañana. Los bloques de
+   ataque viven cada uno en un solo fichero y no lo notan; `(friday, BENIGN)` abarca tres y sí.
 2. **Los splits temporales barajan cada parte.** La garantía cronológica la llevan los **valores**
    de `order_idx`, no el orden de las filas en el DataFrame resultante.
 3. **Los bloques con menos de 3 filas van enteros a train**, con warning
@@ -276,11 +283,12 @@ Cinco detalles del comportamiento que sorprenden si no se conocen:
    `temporal_block_fallback_to_class`.
 
 El resultado de aplicar esto está en [README.md § Resultados](README.md#resultados): F1-macro cae de
-0.9197 a 0.7721 con el protocolo por defecto, y a 0.2973 si además se holdean herramientas de
-ataque. **El entregable no es la caída, es la descomposición**: 0.148 de fuga por casi-duplicados y
-0.475 de artefacto de taxonomía × tiempo. Cómo se separaron, y por qué la primera versión de este
-documento atribuía el 100 % a la fuga, está en
-[PARTICION-TEMPORAL.md](PARTICION-TEMPORAL.md).
+0.9453 a 0.6467 con el protocolo por defecto, y queda en 0.6547 si además se holdean herramientas de
+ataque. **El entregable no es la caída, es el mecanismo**: el recall de Stage 1 por clase muestra
+que buena parte de la diferencia se paga antes de que Stage 2 opine (bajo el temporal, Stage 1 marca
+0.11 de `Scan` y 0.00 de `Botnet`; bajo el aleatorio, ≥ 0.95 de todas). Cómo se llegó hasta aquí —y
+las dos descomposiciones anteriores que no sobrevivieron, incluida la de agosto con `order_idx`
+alfabético— está en [PARTICION-TEMPORAL.md](PARTICION-TEMPORAL.md).
 
 > **Característica conocida: el enrutado in-sample de Stage 1.** El entrenamiento hace
 > `fit(X_train[benign])` y a continuación `predict_binary(X_train)`, así que las filas benignas se
@@ -305,9 +313,10 @@ python -m ml.training.train_cicids --data-dir api/csvs --pipeline xgb
 | `--pipeline [xgb\|mlp\|both]` | `xgb` | `both` añade la comparación cruzada. |
 | `--split [temporal\|random\|day-holdout]` | `temporal` | `random` es el split con fuga del TFA, conservado para cuantificarla. |
 | `--temporal-block [sub-label\|class]` | `sub-label` | Qué define un bloque temporal. `sub-label` aísla la fuga por casi-duplicados; `class` además holdea herramientas de ataque no vistas. Ignorada por `--split random`. Ver [PARTICION-TEMPORAL.md](PARTICION-TEMPORAL.md). |
+| `--class-sample-floor INT` | `0` | Filas mínimas que una clase conserva en la muestra estratificada. `0` deja el muestreo estrictamente proporcional, que es lo que reproduce los runs publicados. **No es una opción neutra**: el suelo cambia el ratio BENIGN:ataque y con él el umbral de Stage 1, así que mueve las métricas de clases que no toca. Ver [PARTICION-TEMPORAL.md §5](PARTICION-TEMPORAL.md). |
 | `--test-days TEXT` | `friday` | Repetible. **Solo aplica con `day-holdout`**; ignorada en el resto. |
 | `--beta FLOAT` | `2.0` | Peso F-beta del umbral de Stage 1. `>1` penaliza los ataques no detectados. |
-| `--skip-tuning / --tune` | `--tune` | `--tune` lanza una `RandomizedSearchCV` 20×3 en Stage 2. Los smokes deben usar `--skip-tuning`. |
+| `--skip-tuning / --tune` | `--tune` | `--tune` lanza una `RandomizedSearchCV` 20×3 en Stage 2, sobre folds cronológicos de ventana expansiva (`ml/flow/cv.py`). Medido con `--sample-size 200000`: 602 s de run completo contra 86 s con `--skip-tuning`, y +0.0117 de F1-macro. Los smokes deben usar `--skip-tuning`. |
 | `--plots / --no-plots` | `--no-plots` | Requiere matplotlib + seaborn (`requirements-dev.txt`, no en la imagen). |
 | `--eda / --no-eda` | `--no-eda` | Figuras exploratorias. Misma dependencia. |
 | `--seed INT` | `42` | Semilla global (numpy, random, sklearn, xgboost). |
@@ -321,6 +330,10 @@ literales, para que `--help` y la dataclass no puedan divergir.
 > medidos con `--sample-size 200000`. Los 844 MB en disco son ~8 GiB de columnas float64 más las
 > copias de `pd.concat` y `clean_dataset`. Bajar `--sample-size` esperando ahorrar memoria no
 > ahorra nada.
+>
+> **`--class-sample-floor` tampoco cambia el pico**, y conviene decirlo aquí para que nadie lo
+> re-derive: el suelo solo decide **cómo** se reparten las filas de la muestra, aguas abajo de la
+> concatenación. Ni la sube ni la baja.
 
 > **`--mlflow` es un NO-OP a propósito.** MLflow en el track de flujos está fuera del alcance del
 > plan. La opción existe por simetría con `python -m ml.training.train`, avisa por stdout y por log
@@ -492,7 +505,18 @@ columnas** con `Timestamp` real, `Flow ID`, IPs y puertos de origen y destino. E
 - Validar el mapa `CAPTURE_DAYS` contra el timestamp real en vez de contra el nombre de fichero.
 
 Es la solución definitiva al problema que la partición temporal solo mitiga. Está **fuera del
-alcance** de esta integración, no descartada.
+alcance** de esta integración, no descartada. Y conviene ser explícito sobre lo que *no* arreglaría:
+**Botnet seguiría siendo un solo día y una sola herramienta**, así que su 0.00 bajo protocolo
+temporal sobreviviría a la migración. Con el suelo de muestreo activado la clase llega a Stage 2 con
+sus 1.948 filas y con recall 1.000 de Stage 1, y el F1 sigue siendo 0.00
+([PARTICION-TEMPORAL.md §5](PARTICION-TEMPORAL.md)).
+
+**Umbrales de Stage 1 por clase.** Hoy hay **uno solo para las siete** (`memoria-cicids2017.md:700`),
+y es la vía por la que el artefacto de una clase contamina a las demás: es lo que hace que `Scan`
+—una clase de una sola herramienta, cuyo bloque se parte idénticamente bajo los dos protocolos
+temporales— pase de 0.995 a 0.201 de F1 al cambiar de protocolo. Arreglarlo es un **rediseño de la
+cascada**, no un parámetro, y también está fuera de alcance. Junto con `GeneratedLabelledFlows` son
+las dos únicas vías que atacarían lo que queda del problema de las clases raras.
 
 Otras mejoras identificadas y no ejecutadas: MLflow en `train_cicids.py`; el **VALIDATION GATE**
 que `sentinel_doc.md` §5.6 documenta y nadie aplica; y tests exhaustivos de `neural_network`

@@ -101,9 +101,26 @@ spec:
                 # event track.
                 - --beta
                 - "2.0"
-                # RandomizedSearchCV over 20 candidates x 3 folds on 140k rows
-                # does not fit the deadline above. Switch to `--tune` and raise
-                # activeDeadlineSeconds together, never separately.
+                # This comment used to say a RandomizedSearchCV over 20
+                # candidates x 3 folds does not fit the deadline above. It has
+                # now been measured, and it does — comfortably.
+                #
+                # MEASURED (22 Aug 2026, laptop, the args above with --tune):
+                # 602 s of wall clock for the whole run against the 10800 of
+                # activeDeadlineSeconds, and 86 s for the same run with
+                # --skip-tuning. The input of the search is not the 140k rows of
+                # the sample but the anomalies Stage 1 routes to Stage 2 —
+                # 67789 under `--temporal-block sub-label`, not the ~93k an
+                # earlier amendment guessed — and the folds are the expanding
+                # chronological window of ml/flow/cv.py, which fits 1.5n of rows
+                # against the 2.0n of the shuffled 3-fold it replaced.
+                #
+                # The deadline stays at 3 h anyway: cluster nodes are not this
+                # laptop, and the margin is the point. What changes is that
+                # switching to `--tune` no longer requires raising it. The
+                # measured gain is small — +0.0117 of F1-macro (0.6467 to
+                # 0.6584) — so `--skip-tuning` remains the default for the
+                # scheduled run, on cost/benefit rather than on the deadline.
                 - --skip-tuning
                 - --no-plots
                 - --no-eda

@@ -531,7 +531,7 @@ Sentinel ingiere **dos modalidades de dato**, con esquemas y pipelines separados
 
 | Modalidad | Esquema | Pipeline de features | Track |
 |---|---|---|---|
-| Evento de log | [`data/schemas/event.json`](./data/schemas/event.json) | `ml/features/pipeline.py` (25 features derivadas) | §5.1–§5.6 |
+| Evento de log | [`data/schemas/event.json`](./data/schemas/event.json) | `ml/features/pipeline.py` (17 features derivadas) | §5.1–§5.6 |
 | Flujo de red | [`data/schemas/flow.json`](./data/schemas/flow.json) | `ml/flow/features.py` (78 columnas CICFlowMeter) | §5.7 |
 
 El resto de §4 describe la modalidad de **evento**. Para la de flujo, el JSON Schema (draft
@@ -795,10 +795,13 @@ empata (0.9747 vs 0.9936) porque lo domina BENIGN — es la métrica que haría 
 la red y por eso no es la que decide.
 
 > Ambas cifras son **cotas optimistas**: proceden del protocolo con split aleatorio, que filtra
-> casi-duplicados de la misma ráfaga entre train y test. Eso **no invalida la comparación** —
-> ambos modelos pagan el mismo sesgo sobre el mismo split—, pero ninguno de los dos números estima
-> el rendimiento sobre tráfico no visto. Con partición temporal sin fuga, XGBoost cae a 0.7721 de
-> F1-macro. Detalle completo en [docs/ml/README.md](./docs/ml/README.md#resultados).
+> casi-duplicados de la misma ráfaga entre train y test. Eso **no invalida la comparación** — ambos
+> modelos pagan el mismo sesgo sobre el mismo split—, pero ninguno de los dos números estima el
+> rendimiento sobre tráfico no visto. Son además **anteriores al arreglo de `order_idx`** de agosto
+> de 2026 y no se han vuelto a medir; bajo split aleatorio ese arreglo mueve poco (+0.026 de
+> F1-macro en el run de 200k), pero las cifras exactas de esta tabla no se han reproducido. Con
+> partición temporal sin fuga, XGBoost cae a 0.6467 de F1-macro. Detalle completo en
+> [docs/ml/README.md](./docs/ml/README.md#resultados).
 
 A la evidencia se suman las razones operativas, que no cambian:
 - Security requires explainability (XGBoost da importancia de features directamente)
@@ -1091,19 +1094,21 @@ lo que filtra casi-duplicados de la misma ráfaga entre train y test. El track d
 
 | Split | Accuracy | F1-macro | F1-weighted |
 |---|---|---|---|
-| `random` (protocolo del TFA) | 0.9944 | **0.9197** | 0.9945 |
-| `temporal` + `--temporal-block sub-label` (default) | 0.9612 | **0.7721** | 0.9597 |
-| `temporal` + `--temporal-block class` | 0.8807 | **0.2973** | 0.8483 |
+| `random` (protocolo del TFA) | 0.9944 | **0.9453** | 0.9945 |
+| `temporal` + `--temporal-block sub-label` (default) | 0.9194 | **0.6467** | 0.9052 |
+| `temporal` + `--temporal-block class` | 0.9165 | **0.6547** | 0.8999 |
 
 Las tres filas comparten dataset y garantía cronológica; entre las dos últimas solo cambia qué
-define un bloque. Eso permite **descomponer** la caída en lugar de atribuirla entera a una causa:
-**0.148 de F1-macro es fuga por casi-duplicados (24 %) y 0.475 es un artefacto de taxonomía ×
-tiempo (76 %)** — `ATTACK_GROUPS` colapsa herramientas de ataque que corrieron en serie dentro del
-día, así que bloquear por clase canónica holdea herramientas enteras sin decirlo.
+define un bloque. La diferencia entre el protocolo aleatorio y el temporal es de **0.2986 de
+F1-macro**, y no toda es «fuga»: bajo el temporal, Stage 1 marca 0.11 de los flujos de `Scan` y
+0.00 de los de `Botnet` —contra ≥ 0.95 de cada clase bajo el aleatorio—, así que buena parte de la
+diferencia se paga **antes** de que el clasificador de Stage 2 opine.
 
-Una versión anterior de este documento presentaba la caída a 0.2809 como «la magnitud de la fuga».
-Se equivocaba por un factor de ~4. El registro del error y su arreglo:
-[docs/ml/PARTICION-TEMPORAL.md](./docs/ml/PARTICION-TEMPORAL.md).
+Este documento ha presentado dos descomposiciones que no sobrevivieron a la siguiente medición: la
+caída a 0.2809 como «la magnitud de la fuga» (error de factor ~4) y el reparto «0.148 de fuga +
+0.475 de artefacto de taxonomía», medido con un `order_idx` que ordenaba los ficheros
+alfabéticamente en lugar de por hora de captura. Las dos, con el experimento de control que aísla
+la segunda, en [docs/ml/PARTICION-TEMPORAL.md](./docs/ml/PARTICION-TEMPORAL.md).
 
 ### Contrato de features
 

@@ -47,12 +47,16 @@ import pandas as pd
 import structlog
 from sklearn.metrics import classification_report
 
-from ml.evaluation.metrics import compare_models
+from ml.evaluation.metrics import compare_models, compute_metrics
 from ml.flow.config import SPLIT_STRATEGIES, TEMPORAL_BLOCKS, FlowConfig
+from ml.flow.cv import TemporalIndex
 from ml.flow.labels import BENIGN_LABEL, CLASS_ORDER
 from ml.flow.loader import (
     DEFAULT_TEST_DAYS,
     LABEL_COL,
+    MIN_MEANINGFUL_BLOCK_ROWS,
+    audit_class_support,
+    build_temporal_index,
     clean_dataset,
     filter_minority_classes,
     get_feature_columns,
@@ -79,6 +83,12 @@ logger = structlog.get_logger()
 # as an attribute of ``ml.flow.pipelines``, which the package deliberately does
 # not re-export.
 Cascade: TypeAlias = "CascadeXGBPipeline | CascadeMLPPipeline"
+
+# One cascade's class-by-class result: ``{"f1": {...}, "support": {...}}``. A
+# union rather than ``dict[str, dict[str, float]]`` because the supports are
+# counts and must serialise as integers — an F1 of 0.00 on 24 test rows and one
+# on 24.000 are different findings, and "480.0 rows" reads like a measurement.
+PerClassBlock: TypeAlias = dict[str, dict[str, float] | dict[str, int]]
 
 
 # ============================================================================
@@ -126,6 +136,11 @@ class _Dataset:
     y_test: np.ndarray
     feature_names: list[str]
     labels: list[str]
+    # Chronological position and temporal block of every row of X_train, in the
+    # same row order. Only Stage 2's hyperparameter search reads it, to cut its
+    # folds the way the split was cut; None under `--split random`, which makes
+    # no chronological claim for the folds to honour.
+    train_index: TemporalIndex | None = None
 
 
 # ============================================================================
@@ -144,6 +159,7 @@ def _build_config(
     data_dir: str,
     output_dir: str,
     sample_size: int,
+    class_sample_floor: int,
     split: str,
     temporal_block: str,
     beta: float,
@@ -156,6 +172,9 @@ def _build_config(
         data_dir: Directory holding the CICIDS2017 CSVs.
         output_dir: Root for every artifact this run writes.
         sample_size: Target stratified sample size; 0 uses the full dataset.
+        class_sample_floor: Minimum rows a class keeps in that sample; 0 leaves
+            sampling strictly proportional, which is what the published runs
+            used.
         split: Partitioning protocol, one of
             :data:`~ml.flow.config.SPLIT_STRATEGIES`.
         temporal_block: What defines a temporal block, one of
@@ -176,6 +195,7 @@ def _build_config(
         data_path=Path(data_dir),
         output_path=Path(output_dir),
         sample_size=sample_size,
+        class_sample_floor=class_sample_floor,
         split_strategy=split,
         temporal_block=temporal_block,
         beta=beta,
@@ -221,6 +241,7 @@ def _build_matrices(
     train_df: pd.DataFrame,
     val_df: pd.DataFrame,
     test_df: pd.DataFrame,
+    config: FlowConfig,
 ) -> _Dataset:
     """
     Project the three splits onto the feature space.
@@ -229,14 +250,23 @@ def _build_matrices(
         train_df: Training split, as returned by the partitioning functions.
         val_df: Validation split.
         test_df: Test split.
+        config: Track configuration. **Required, with no default**: it decides
+            the block key of the temporal index built here, and a default would
+            quietly build the index on ``temporal_block="sub-label"`` whatever
+            protocol the run actually declared — folds cut along one block key
+            while the test set was cut along another, which is precisely the
+            silent-mismatch family this track documents.
 
     Returns:
-        The matrices plus the feature and class name lists.
+        The matrices, the feature and class name lists, and the training set's
+        temporal index.
 
     Note:
         The column list comes from :func:`~ml.flow.loader.get_feature_columns`,
         the single source of truth for the feature space. Building it here by
         hand is what would let ``capture_day`` or ``order_idx`` reach the model.
+        The index is built from the *unprojected* frame for the same reason and
+        travels beside the matrix rather than inside it.
     """
     feature_cols = get_feature_columns(train_df)
 
@@ -247,6 +277,12 @@ def _build_matrices(
     present = set(y_train) | set(y_val) | set(y_test)
     labels = [cls for cls in CLASS_ORDER if cls in present]
 
+    # A random split shuffles rows across every block, so "the chunk before this
+    # one" means nothing in it; the folds stay shuffled and say so.
+    train_index = (
+        None if config.split_strategy == "random" else build_temporal_index(train_df, config)
+    )
+
     logger.info(
         "flow_training_matrices_built",
         n_features=len(feature_cols),
@@ -254,6 +290,7 @@ def _build_matrices(
         n_val=int(len(y_val)),
         n_test=int(len(y_test)),
         labels=labels,
+        temporal_index=train_index is not None,
     )
 
     return _Dataset(
@@ -265,6 +302,7 @@ def _build_matrices(
         y_test=y_test,
         feature_names=feature_cols,
         labels=labels,
+        train_index=train_index,
     )
 
 
@@ -317,13 +355,20 @@ def _run_cascade(
     *,
     skip_tuning: bool,
     plots: bool,
-) -> tuple[Cascade, dict[str, float], Path]:
+) -> tuple[Cascade, dict[str, float], PerClassBlock, Path]:
     """
     Train, evaluate, save and optionally plot one cascade.
 
     The save happens before the figures on purpose: plotting is the only step
     here that can fail for reasons unrelated to the model, and a run that has
     already produced a servable artifact should not lose it to a broken figure.
+
+    Every F1 measured here — the headline macro, the per-class table and the
+    ``classification_report`` printed below — averages over ``dataset.labels``,
+    the classes this run declares. That is the point of passing ``labels=``
+    explicitly three times: a class absent from the test set has to score 0.0
+    and stay in the denominator, not disappear from it, or the same model gets
+    two different F1-macros depending on which code path computed them.
 
     Args:
         kind: ``"xgb"`` or ``"mlp"``.
@@ -333,7 +378,10 @@ def _run_cascade(
         plots: Generate the per-cascade figures.
 
     Returns:
-        ``(pipeline, test_metrics, output_dir)``.
+        ``(pipeline, test_metrics, per_class, output_dir)``, where ``per_class``
+        is ``{"f1": {class: float}, "support": {class: int}}`` over
+        ``dataset.labels``. It is kept out of ``test_metrics`` because that dict
+        is ``dict[str, float]`` and gets logged value by value.
     """
     started = time.perf_counter()
     pipeline, output_dir = _make_pipeline(kind, config, dataset.feature_names)
@@ -357,14 +405,26 @@ def _run_cascade(
         beta=config.beta,
         skip_tuning=skip_tuning,
         feature_names=dataset.feature_names,
+        train_index=dataset.train_index,
     )
 
-    metrics = pipeline.evaluate(dataset.X_test, dataset.y_test)
+    metrics = pipeline.evaluate(dataset.X_test, dataset.y_test, labels=dataset.labels)
     pipeline.save(output_dir)
 
     y_pred = pipeline.predict(dataset.X_test)
     report = classification_report(dataset.y_test, y_pred, labels=dataset.labels, zero_division=0)
     print(f"\n--- {display}: classification report ---\n{report}")
+
+    per_class = _per_class_breakdown(dataset, y_pred)
+    below = [cls for cls, n in per_class["support"].items() if n == 0]
+    if below:
+        # A zero-support class scores 0.0 in the macro above. Saying so here
+        # keeps the number honest without letting the class drop out of it.
+        logger.warning(
+            "flow_training_class_without_test_support",
+            pipeline=pipeline.name,
+            classes=below,
+        )
 
     if plots:
         try:
@@ -388,7 +448,32 @@ def _run_cascade(
         elapsed_seconds=round(elapsed, 1),
         **{key: round(float(value), 6) for key, value in metrics.items()},
     )
-    return pipeline, metrics, output_dir
+    return pipeline, metrics, per_class, output_dir
+
+
+def _per_class_breakdown(dataset: _Dataset, y_pred: np.ndarray) -> PerClassBlock:
+    """
+    Per-class F1 and test support over the run's declared classes.
+
+    Computed with :func:`~ml.evaluation.metrics.compute_metrics` — the same
+    function ``compare_models`` uses — so the per-class table in the summary and
+    the one in the cross-cascade comparison cannot disagree.
+
+    The support counts travel with the F1s on purpose: an F1 of 0.00 means
+    something entirely different for a class with 24 test rows than for one with
+    24.000, and the summary is where that distinction has to survive.
+
+    Args:
+        dataset: Prepared matrices; supplies ``y_test`` and the class list.
+        y_pred: Cascade predictions for ``dataset.X_test``.
+
+    Returns:
+        ``{"f1": {class: float}, "support": {class: int}}``, keyed by
+        ``dataset.labels`` in canonical order.
+    """
+    per_class = compute_metrics(dataset.y_test, y_pred, labels=dataset.labels)["f1_per_class"]
+    support = {label: int(np.count_nonzero(dataset.y_test == label)) for label in dataset.labels}
+    return {"f1": per_class, "support": support}
 
 
 def _cascade_proba(
@@ -638,11 +723,11 @@ def _operating_points(pipeline: Cascade, dataset: _Dataset) -> dict[str, Any] | 
       the one that estimates behaviour on unseen traffic, and the only one that
       belongs in a results table.
 
-    On CICIDS2017 under the default protocol they differ by 18 points of recall
-    (0.986 → 0.804), because validation is the middle slice of each temporal
+    On CICIDS2017 under the default protocol they differ by 20 points of recall
+    (0.760 → 0.560), because validation is the middle slice of each temporal
     block and test is the last one. Stage 1's recall is a hard ceiling for the
     cascade, so publishing the selection number understates the miss rate by
-    more than an order of magnitude.
+    nearly a factor of two.
 
     Returns None rather than zeros when no search ever ran: a fabricated
     operating point in the training record is worse than an absent one.
@@ -668,6 +753,8 @@ def _build_summary(
     mlflow_requested: bool,
     trained: dict[str, Cascade],
     metrics: dict[str, dict[str, float]],
+    per_class: dict[str, PerClassBlock],
+    class_support: dict[str, dict[str, int]],
     model_paths: dict[str, str],
     comparison: dict[str, Any] | None,
     elapsed: float,
@@ -678,6 +765,15 @@ def _build_summary(
     The ``split`` block is the point of the file: an F1-macro from this track is
     uninterpretable without knowing which partitioning protocol produced it, and
     the temporal and random numbers are expected to differ.
+
+    ``metrics`` and ``per_class`` are two views of one measurement: every F1 in
+    both averages over ``dataset.labels``, so ``metrics[c]["f1_macro"]`` is the
+    unweighted mean of ``per_class[c]["f1"]`` and — for a ``--pipeline both``
+    run — agrees with the macro under ``comparison``.
+
+    ``class_support`` sits beside them at the top level and is model-free: it
+    says how many rows each class had to be measured *on*, which is what decides
+    whether a per-class F1 is a result or noise.
     """
     return {
         "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
@@ -707,12 +803,28 @@ def _build_summary(
         },
         "parameters": {
             "sample_size": config.sample_size,
+            # 0 means strictly proportional sampling, the setting every figure
+            # in docs/ml/PARTICION-TEMPORAL.md was measured under.
+            "class_sample_floor": config.class_sample_floor,
             "seed": config.random_seed,
             "beta": config.beta,
             "skip_tuning": skip_tuning,
             "pipelines": sorted(metrics),
         },
         "metrics": metrics,
+        # Per cascade, `{"f1": {...}, "support": {...}}` over `data.classes`.
+        # Separate from `metrics` because that block is flat scalars, and
+        # separate from `comparison` because it exists for single-cascade runs
+        # too — which is precisely when nothing else records a class-by-class
+        # figure, and a class at F1 0.00 is an operational claim: `ml/flow/
+        # fusion.py` maps `credential_stuffing` onto Botnet.
+        "per_class": per_class,
+        # Rows per class per split, model-free, from ml.flow.loader.
+        # audit_class_support. Top-level rather than inside `data`, which is a
+        # flat map, and never a filter: a class below the floor is reported and
+        # kept. Dropping Botnet would lift the headline F1-macro ~0.11 by
+        # deleting the evidence for it.
+        "class_support": class_support,
         # Two entries per cascade — `selection` (validation, where the threshold
         # was chosen) and `test` (held out). The `if_*` keys inside `metrics`
         # mirror the `test` one.
@@ -788,6 +900,19 @@ def _build_summary(
     ),
 )
 @click.option(
+    "--class-sample-floor",
+    type=int,
+    default=_CONFIG_DEFAULTS.class_sample_floor,
+    show_default=True,
+    help=(
+        "Minimum rows a class keeps in the stratified sample. 0 (the default) "
+        "leaves sampling strictly proportional, reproducing the published runs. "
+        f"A useful value is {MIN_MEANINGFUL_BLOCK_ROWS}, the size below which a "
+        "per-class F1 stops being measurable. NOTE: the floor changes the "
+        "BENIGN:attack ratio, so it moves the metrics of classes it does not lift."
+    ),
+)
+@click.option(
     "--test-days",
     multiple=True,
     default=DEFAULT_TEST_DAYS,
@@ -836,6 +961,7 @@ def main(
     data_dir: str,
     output_dir: str,
     sample_size: int,
+    class_sample_floor: int,
     pipeline: str,
     split: str,
     temporal_block: str,
@@ -876,6 +1002,10 @@ def main(
 
         # Both cascades, with figures
         python -m ml.training.train_cicids --data-dir api/csvs --pipeline both --plots
+
+        # Stop throwing away 92% of Botnet's rows — publishes a different baseline
+        python -m ml.training.train_cicids --data-dir api/csvs --sample-size 200000 \\
+            --class-sample-floor 2000 --skip-tuning --output-dir /tmp/flow-floor
     """
     structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
 
@@ -883,6 +1013,7 @@ def main(
         data_dir=data_dir,
         output_dir=output_dir,
         sample_size=sample_size,
+        class_sample_floor=class_sample_floor,
         split=split,
         temporal_block=temporal_block,
         beta=beta,
@@ -897,6 +1028,7 @@ def main(
         data_dir=str(config.data_path),
         output_dir=str(config.output_path),
         sample_size=config.sample_size,
+        class_sample_floor=config.class_sample_floor,
         pipeline=pipeline,
         split=config.split_strategy,
         temporal_block=config.temporal_block,
@@ -919,7 +1051,11 @@ def main(
         _run_eda(frame, config)
 
     train_df, val_df, test_df = split_dataset_by_strategy(frame, config, test_days=test_days)
-    dataset = _build_matrices(train_df, val_df, test_df)
+    # After the split, not before: sampling sets how many rows a class has, the
+    # split sets how many are left to test on, and the second number is the one
+    # a per-class F1 is computed from.
+    class_support = audit_class_support(train_df, val_df, test_df, config)
+    dataset = _build_matrices(train_df, val_df, test_df, config)
 
     if plots:
         try:
@@ -932,10 +1068,11 @@ def main(
 
     trained: dict[str, Cascade] = {}
     metrics: dict[str, dict[str, float]] = {}
+    per_class: dict[str, PerClassBlock] = {}
     model_paths: dict[str, str] = {}
 
     for kind in kinds:
-        cascade, cascade_metrics, path = _run_cascade(
+        cascade, cascade_metrics, cascade_per_class, path = _run_cascade(
             kind,
             dataset,
             config,
@@ -944,6 +1081,7 @@ def main(
         )
         trained[kind] = cascade
         metrics[cascade.name] = cascade_metrics
+        per_class[cascade.name] = cascade_per_class
         model_paths[cascade.name] = str(path)
 
     comparison: dict[str, Any] | None = None
@@ -967,6 +1105,8 @@ def main(
         mlflow_requested=mlflow,
         trained=trained,
         metrics=metrics,
+        per_class=per_class,
+        class_support=class_support,
         model_paths=model_paths,
         comparison=comparison,
         elapsed=elapsed,

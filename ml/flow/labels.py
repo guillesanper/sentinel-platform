@@ -13,6 +13,10 @@ Single source of truth for:
 * ``CAPTURE_DAYS`` / ``map_capture_day`` — CSV filename → capture day. The
   MachineLearningCVE distribution of CICIDS2017 has no ``Timestamp`` column, so
   the filename is the only carrier of time.
+* ``CAPTURE_FILE_ORDER`` / ``capture_file_rank`` — the same filename → its
+  position in the capture week. Needed because the filenames do *not* sort
+  chronologically, and ``ml.flow.loader`` derives ``order_idx`` from the order in
+  which it reads them.
 
 Note that the collapse is lossy in a way that matters for partitioning, not just
 for reporting: the tools merged into one class ran **sequentially** inside their
@@ -133,14 +137,51 @@ CAPTURE_DAY_ORDER: Final[tuple[str, ...]] = (
     "friday",
 )
 
+# The eight capture files in the order they were recorded.
+#
+# Sorting the filenames does **not** produce this order, and the difference is
+# not cosmetic: alphabetically `Friday-…-Afternoon-DDos` < `Friday-…-Afternoon-
+# PortScan` < `Friday-…-Morning`, so the two afternoon captures would come before
+# the morning one; Thursday inverts the same way. `ml.flow.loader` numbers rows
+# by the order in which it reads the files, so a sorted glob makes `order_idx`
+# claim an afternoon flow happened before a morning one.
+#
+# Attack blocks survive that inversion untouched — every attack label lives in
+# exactly one file — but `(friday, BENIGN)` spans three files and
+# `(thursday, BENIGN)` two, and BENIGN is precisely the population Stage 1 is
+# fitted on. See `ml.flow.loader.load_cicids2017`.
+CAPTURE_FILE_ORDER: Final[tuple[str, ...]] = (
+    "Monday-WorkingHours.pcap_ISCX.csv",
+    "Tuesday-WorkingHours.pcap_ISCX.csv",
+    "Wednesday-workingHours.pcap_ISCX.csv",
+    "Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv",
+    "Thursday-WorkingHours-Afternoon-Infilteration.pcap_ISCX.csv",
+    "Friday-WorkingHours-Morning.pcap_ISCX.csv",
+    "Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv",
+    "Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv",
+)
+
+# Rank handed to filenames that are not part of the canonical distribution: they
+# sort after every known capture, and the caller is expected to break the
+# resulting tie by name so the load order stays deterministic.
+UNKNOWN_CAPTURE_FILE_RANK: Final[int] = len(CAPTURE_FILE_ORDER)
+
 # Case-insensitive lookup tables, built once at import time.
 _CAPTURE_DAYS_CI: Final[dict[str, str]] = {name.lower(): day for name, day in CAPTURE_DAYS.items()}
 _WEEKDAYS_CI: Final[frozenset[str]] = frozenset(CAPTURE_DAY_ORDER)
+_CAPTURE_FILE_RANKS_CI: Final[dict[str, int]] = {
+    name.lower(): rank for rank, name in enumerate(CAPTURE_FILE_ORDER)
+}
 
 
 # ============================================================================
 # Public API
 # ============================================================================
+
+
+def _basename(filename: str) -> str:
+    """Last path component of ``filename``, for both separators."""
+    return filename.replace("\\", "/").rsplit("/", maxsplit=1)[-1]
 
 
 def normalize_raw_label(raw: object) -> str:
@@ -219,7 +260,7 @@ def map_capture_day(filename: str) -> str:
         >>> map_capture_day("random.csv")
         'unknown'
     """
-    name = filename.replace("\\", "/").rsplit("/", maxsplit=1)[-1]
+    name = _basename(filename)
 
     if name in CAPTURE_DAYS:
         return CAPTURE_DAYS[name]
@@ -234,3 +275,36 @@ def map_capture_day(filename: str) -> str:
 
     logger.warning("capture_day_unrecognised", filename=name)
     return UNKNOWN_CAPTURE_DAY
+
+
+def capture_file_rank(filename: str) -> int:
+    """
+    Position of a CICIDS2017 CSV in the capture week.
+
+    The sort key ``ml.flow.loader.load_cicids2017`` reads the CSVs with, and the
+    reason it does not simply call :func:`sorted`. See
+    :data:`CAPTURE_FILE_ORDER` for what alphabetical order gets wrong.
+
+    Deliberately *not* derived from :func:`map_capture_day`: the inversion this
+    fixes happens **inside** a day, between the morning and afternoon captures of
+    Thursday and Friday, so day granularity cannot express it.
+
+    Args:
+        filename: File name (a full path is accepted; only the last component is
+            inspected). Matched case-insensitively, like :func:`map_capture_day`.
+
+    Returns:
+        A 0-based rank for the eight canonical filenames, or
+        :data:`UNKNOWN_CAPTURE_FILE_RANK` for anything else — including the
+        generated sample CSVs, which all share that rank and therefore keep
+        whatever order the caller's tie-break gives them.
+
+    Example:
+        >>> capture_file_rank("Friday-WorkingHours-Morning.pcap_ISCX.csv")
+        5
+        >>> capture_file_rank("Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv")
+        6
+        >>> capture_file_rank("random.csv") == UNKNOWN_CAPTURE_FILE_RANK
+        True
+    """
+    return _CAPTURE_FILE_RANKS_CI.get(_basename(filename).lower(), UNKNOWN_CAPTURE_FILE_RANK)

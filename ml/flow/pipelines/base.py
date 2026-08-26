@@ -25,6 +25,8 @@ from typing import Any, Final
 import numpy as np
 import structlog
 
+from ml.flow.cv import TemporalIndex
+
 logger = structlog.get_logger()
 
 
@@ -67,6 +69,7 @@ class BaseCascadePipeline(ABC):
         beta: float = 1.0,
         skip_tuning: bool = False,
         feature_names: list[str] | None = None,
+        train_index: TemporalIndex | None = None,
     ) -> "BaseCascadePipeline":
         """
         Train Stage 1 and Stage 2 in sequence.
@@ -86,6 +89,13 @@ class BaseCascadePipeline(ABC):
                 that :meth:`save` can persist them.
             skip_tuning: Skip the Stage 2 hyperparameter search and use the
                 config defaults.
+            train_index: Chronological position and temporal block of every row
+                of ``X_train``, from
+                :func:`ml.flow.loader.build_temporal_index`. Lets Stage 2 tune
+                on chronological folds instead of shuffled ones; see
+                :mod:`ml.flow.cv`. Optional, and ignored by cascades whose Stage
+                2 has no hyperparameter search. Pass None for a random split:
+                there is no temporal claim to make about it.
 
         Returns:
             self
@@ -107,17 +117,40 @@ class BaseCascadePipeline(ABC):
         """
 
     @abstractmethod
-    def evaluate(self, X_test: np.ndarray, y_test: np.ndarray) -> dict[str, float]:
+    def evaluate(
+        self,
+        X_test: np.ndarray,
+        y_test: np.ndarray,
+        *,
+        labels: list[str] | None = None,
+    ) -> dict[str, float]:
         """
         Score the cascade end to end on a held-out test set.
 
         Args:
             X_test: Test feature matrix.
             y_test: Ground-truth canonical string labels.
+            labels: Canonical class list to average the F1 scores over. Pass the
+                classes the run declares — ``_Dataset.labels`` in the training
+                CLI — so that a class the test set happens not to contain still
+                counts as a 0.0 in the macro. Left as None, sklearn averages
+                over the union of ``y_test`` and ``y_pred``, which **drops** an
+                unsupported class from the denominator and silently inflates the
+                headline figure relative to the ``classification_report``
+                printed beside it. The default is None only so that callers
+                written before this argument existed keep their measured
+                behaviour.
 
         Returns:
             Metric name → value. Implementations must provide at least
             ``accuracy``, ``f1_macro`` and ``f1_weighted``.
+
+        Note:
+            Per-class figures deliberately do not belong here: this dict is
+            ``dict[str, float]`` and :meth:`_log_evaluation` rounds every value
+            as a float. Compute them with
+            :func:`ml.evaluation.metrics.compute_metrics` — the training CLI
+            records them under the summary's ``per_class`` key.
         """
 
     @abstractmethod
