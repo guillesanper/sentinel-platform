@@ -222,7 +222,6 @@ class TestTrainingCli:
                 "--n-estimators",
                 "20",
                 "--no-mlflow",
-                "--no-window-features",
                 "--output-dir",
                 str(tmp_path),
                 *extra,
@@ -266,3 +265,38 @@ class TestTrainingCli:
         threshold = summary["threshold"]
         assert threshold["strategy"] == "none"
         assert threshold["operating_point"] is None
+
+    def test_artifacts_take_the_same_arity_the_api_will_feed_them(self, tmp_path: Path) -> None:
+        """
+        Both saved models must accept exactly ``FeatureExtractor().n_features``
+        columns — the extractor ``api/main.py`` instantiates at startup.
+
+        This is the regression test for a bug that shipped: training defaulted
+        to a 25-column campaign pipeline while the API sent 17, so every
+        ``POST /v1/predict`` died inside the model with ``X has 17 features, but
+        IsolationForest is expecting 25``. Nothing caught it. ``/ready`` reports
+        ``anomaly_detector: true`` off ``is_loaded`` alone and never looks at the
+        arity, the CLI tests passed ``--no-window-features`` and so only ever
+        exercised the path that happened to work, and the flag that chose
+        between them defaulted to the broken one.
+
+        The switch is gone, so the arities cannot drift by configuration any
+        more. They can still drift by edit — a column added to
+        ``FeatureExtractor.FEATURE_NAMES`` without retraining — which is what
+        this pins.
+        """
+        import joblib
+
+        from ml.features.pipeline import FeatureExtractor
+
+        self._run(tmp_path, "--no-optimize-threshold")
+        expected = FeatureExtractor().n_features
+
+        for artifact in ("anomaly_detector.joblib", "attack_classifier.joblib"):
+            path = tmp_path / artifact
+            assert path.exists(), f"{artifact} was not written"
+            model = joblib.load(path)["model"]
+            assert model.n_features_in_ == expected, (
+                f"{artifact} expects {model.n_features_in_} features, "
+                f"but the API feeds it {expected}"
+            )

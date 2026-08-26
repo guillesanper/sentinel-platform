@@ -94,16 +94,24 @@ sentinel-platform/
 
 ## 🚀 Quick Start
 
+La plataforma **se ejecuta y se prueba entera en local**, sin GCP y sin Kubernetes. Esa es la ruta
+de los pasos 1–5. GCP solo hace falta para el despliegue gestionado (pasos 6–8).
+
 ### Prerequisites
 
 ```bash
-# Required tools
+python --version          # >= 3.11 (obligatorio para todo lo demás)
+docker --version          # Opcional: solo para el paso 5
+
+# Solo para el despliegue en GCP (pasos 6-8)
 gcloud --version          # Google Cloud SDK
 terraform --version       # >= 1.6.0
 kubectl version           # Kubernetes CLI
-python --version          # >= 3.11
-docker --version          # Docker
 ```
+
+---
+
+## 🖥️ Ejecución local (sin cloud)
 
 ### 1. Clone & Setup
 
@@ -111,15 +119,130 @@ docker --version          # Docker
 git clone https://github.com/yourusername/sentinel-platform.git
 cd sentinel-platform
 
-# Create virtual environment
-python -3.11 -m venv venv
-source venv/bin/activate  # Linux/Mac
-# or: .\venv\Scripts\activate  # Windows
+# Entorno virtual
+python3.11 -m venv venv          # Windows: py -3.11 -m venv venv
+source venv/bin/activate         # Windows: .\venv\Scripts\Activate.ps1
 
 pip install -r requirements.txt
 ```
 
-### 2. GCP Setup
+> Todos los comandos que siguen se lanzan **desde la raíz del repositorio**, nunca desde `api/`.
+> El paquete se importa como `api.main`, así que un `cd api` rompe los imports absolutos.
+
+### 2. Entrenar los modelos
+
+Ninguno de los dos tracks trae artefactos versionados: los `.joblib` no se suben al repositorio
+(`models/flow/` entero está en `.gitignore`, y de `models/` solo se versionan los JSON de
+métricas). En un clon limpio hay que entrenar.
+
+El **track de eventos es obligatorio** — sin este paso, `/ready` devuelve 503 y `/v1/predict`
+falla. Es un generador sintético, no necesita datos externos y tarda un par de minutos:
+
+```bash
+python -m ml.training.train --n-samples 60000 --attack-ratio 0.2 \
+  --threshold-strategy fbeta --beta 2.0 --output-dir models --no-mlflow
+```
+
+Escribe `anomaly_detector.joblib`, `attack_classifier.joblib`, `metrics.json`,
+`confusion_matrix.json` y `training_summary.json` en `models/`.
+
+> El número de features del track de eventos (17, las de `FeatureExtractor`) **no es configurable
+> a propósito**: es el mismo extractor que instancia `api/main.py` al arrancar, y esa identidad es
+> lo único que impide servir un modelo cuyas columnas signifiquen otra cosa. Ver el comentario en
+> [`ml/training/train.py`](./ml/training/train.py) donde vivía el flag `--use-window-features`.
+
+El **track de flujos es opcional**: la API arranca sin él y `/ready` sigue devolviendo 200 con
+`flow_detector: false`; son `/v1/predict/flow` y `/v1/analyze/flow/batch` los que responden 503
+hasta que existan los artefactos. Entrenarlo **requiere los CSV de CICIDS2017 y ~8 GiB de RAM**:
+
+```bash
+python -m ml.training.train_cicids --data-dir api/csvs --sample-size 200000 \
+  --pipeline xgb --split temporal --skip-tuning --output-dir models/flow
+```
+
+Los CSV (844 MB) **no se versionan**: se descargan de
+[UNB CIC](https://www.unb.ca/cic/datasets/ids-2017.html), distribución `MachineLearningCSV`.
+Detalles de opciones y resultados en [docs/ml/CICIDS2017-TRACK.md](./docs/ml/CICIDS2017-TRACK.md).
+
+### 3. Arrancar la API
+
+```bash
+# Desde la raíz del repositorio
+uvicorn api.main:app --reload --port 8000
+```
+
+Docs interactivas en <http://localhost:8000/docs>.
+
+### 4. Comprobar que funciona
+
+```bash
+# 4a. ¿Vivo?
+curl http://localhost:8000/health
+# {"status":"healthy","timestamp":"..."}
+
+# 4b. ¿Listo? Los tres checks del track de eventos deben dar true; los dos de flujos
+#     solo si entrenaste ese track.
+curl http://localhost:8000/ready
+# {"status":"ready","checks":{"feature_extractor":true,"anomaly_detector":true,
+#  "attack_classifier":true,"flow_detector":true,"flow_classifier":true}}
+```
+
+Un **503 en `/ready`** con `anomaly_detector: false` significa que falta el paso 2. Un
+`flow_detector: false` **no** afecta al código de estado: el track de flujos es opcional y degrada
+por su cuenta a 503 en sus propias rutas.
+
+Los endpoints de predicción piden un JWT. Para desarrollo se firma con el secreto por defecto:
+
+```bash
+export TOKEN=$(python -c "from api.security.auth import create_access_token; \
+  print(create_access_token('local-dev', scopes=['predict:read','predict:write']))")
+```
+
+```powershell
+# PowerShell
+$env:TOKEN = python -c "from api.security.auth import create_access_token; print(create_access_token('local-dev', scopes=['predict:read','predict:write']))"
+```
+
+Un evento de log y un flujo de red, uno por track:
+
+```bash
+curl -X POST http://localhost:8000/v1/predict \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
+  -d '{"timestamp":"2024-01-15T14:32:18Z",
+       "source":{"type":"auth","hostname":"server-01","ip":"10.0.1.45"},
+       "actor":{"user":"admin","source_ip":"203.0.113.45"},
+       "action":{"type":"authentication","subtype":"login_failed","result":"failure"}}'
+
+curl -X POST http://localhost:8000/v1/predict/flow \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
+  -d '{"features":{"Destination Port":80,"Flow Duration":1532000,"Total Fwd Packets":12}}'
+```
+
+Para una prueba con datos reales, cualquier fila de `api/csvs/*.csv` sirve como cuerpo de
+`/v1/predict/flow`: se mandan las 78 columnas menos `Label` dentro de `features` y se compara la
+respuesta con la etiqueta del CSV.
+
+Y la suite de tests, que no necesita ni API levantada ni modelos entrenados:
+
+```bash
+pytest tests/unit -v
+```
+
+### 5. Docker (opcional)
+
+```bash
+docker build -f api/Dockerfile -t sentinel-api:local .
+docker run --rm -p 8000:8000 -v "$(pwd)/models:/app/models:ro" sentinel-api:local
+```
+
+El montaje de `models/` es lo que da a la imagen los artefactos del paso 2; sin él la API arranca
+igual pero con el track de eventos degradado.
+
+---
+
+## ☁️ Despliegue en GCP
+
+### 6. GCP Setup
 
 ```bash
 # Authenticate
@@ -134,7 +257,7 @@ gcloud services enable \
   secretmanager.googleapis.com
 ```
 
-### 3. Deploy Infrastructure
+### 7. Deploy Infrastructure
 
 ```bash
 cd infra/terraform/environments/dev
@@ -143,7 +266,7 @@ terraform plan
 terraform apply
 ```
 
-### 4. Deploy to Kubernetes
+### 8. Deploy to Kubernetes
 
 ```bash
 # Get credentials
@@ -163,32 +286,10 @@ sed -i "s/PROJECT_ID/${PROJECT_ID}/g" k8s/overlays/dev/kustomization.yaml
 
 > **Nota**: Los secrets se gestionan automáticamente mediante External Secrets Operator (ESO),
 > que sincroniza desde GCP Secret Manager. Ver [Guia de Deployment](./docs/DEPLOYMENT.md) para mas detalles.
-
-### 5. Run Locally (Development)
-
-```bash
-cd api
-uvicorn main:app --reload --port 8000
-
-# Test endpoint
-curl http://localhost:8000/health
-```
-
-### 6. Train Models
-
-```bash
-# Track de eventos (generador sintético, sin datos externos)
-python -m ml.training.train --n-samples 60000 --attack-ratio 0.2 \
-  --threshold-strategy fbeta --beta 2.0 --output-dir models --no-mlflow
-
-# Track de flujos (requiere los CSV de CICIDS2017 y ~8 GiB de RAM)
-python -m ml.training.train_cicids --data-dir api/csvs --sample-size 200000 \
-  --pipeline xgb --split temporal --skip-tuning --output-dir models/flow
-```
-
-Los CSV de CICIDS2017 (844 MB) **no se versionan**: se descargan de
-[UNB CIC](https://www.unb.ca/cic/datasets/ids-2017.html), distribución `MachineLearningCSV`.
-Detalles de opciones y resultados en [docs/ml/CICIDS2017-TRACK.md](./docs/ml/CICIDS2017-TRACK.md).
+>
+> Los overlays de `k8s/overlays/` son la única pieza que **no** es cloud-agnóstica: dependen de ESO
+> contra GCP Secret Manager. Para probarlos en un clúster local (kind/minikube) hay que sustituir
+> el `ExternalSecret` por un `Secret` plano.
 
 ## 📊 API Endpoints
 
@@ -307,7 +408,6 @@ kubectl port-forward svc/grafana 3000:3000 -n sentinel-observability
 ## 📖 Documentation
 
 - [Guia de Deployment](./docs/DEPLOYMENT.md) - Proceso completo de despliegue
-- [Guia de Migracion](./docs/MIGRATION_GUIDE.md) - Migracion desde deploy.sh
 - [Troubleshooting de Secrets](./docs/SECRETS_TROUBLESHOOTING.md) - Problemas con ESO
 - [Modulo Kubernetes Terraform](./infra/terraform/modules/kubernetes/README.md) - Configuracion de ESO
 - [Technical Design Document](./sentinel_doc.md) - Diseno tecnico completo (infra, ML, API, k8s, CI/CD)

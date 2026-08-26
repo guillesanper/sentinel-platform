@@ -7,7 +7,7 @@ Two detection tracks are served side by side over different data modalities.
 They share no feature space and no taxonomy, so they have separate models,
 separate schemas and separate endpoints:
 
-- **events** — log records, 25 features, ``normal|brute_force|…``
+- **events** — log records, 17 features, ``normal|brute_force|…``
 - **flows** — CICFlowMeter network flows, 78 features,
   ``BENIGN|Botnet|BruteForce|DDoS|DoS|Scan|WebAttack``
 

@@ -241,7 +241,6 @@ curl http://localhost:8000/health
 
 Si encuentras problemas durante el deployment, consulta:
 - [Guía de Troubleshooting de Secrets](./SECRETS_TROUBLESHOOTING.md)
-- [Guía de Migración desde deploy.sh](./MIGRATION_GUIDE.md)
 
 ## Rollback
 

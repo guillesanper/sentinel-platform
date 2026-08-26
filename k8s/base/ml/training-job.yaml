@@ -72,10 +72,8 @@ spec:
               args:
                 # Synthetic generator. `--data-path` / `--csv-path` are the
                 # alternatives, and both need a corpus that is not in the
-                # cluster today; 60k events is the point where the campaign
-                # windowing (`--use-window-features`, the default) still leaves
-                # a validation split large enough for the threshold search to
-                # mean anything.
+                # cluster today; 60k events leaves a validation split large
+                # enough for the threshold search to mean anything.
                 - --n-samples
                 - "60000"
                 - --attack-ratio
@@ -174,7 +172,7 @@ data:
 # along with the /config mount that carried it. It described a training run
 # nobody performs: `batch_size`, `epochs` and `early_stopping_patience` for
 # models that are an IsolationForest and an XGBoost classifier, and
-# `features.n_features: 17` when the event track has used 25 features since
-# window features became the default. `ml/training/train.py` is 100% click and
-# never opened the file, so the wrong numbers were invisible. Every value that
-# actually steers a run is now an explicit flag in `args` above.
+# `features.n_features` for a count the code derives from `FeatureExtractor`
+# rather than reads. `ml/training/train.py` is 100% click and never opened the
+# file, so the wrong numbers were invisible. Every value that actually steers a
+# run is now an explicit flag in `args` above.

@@ -4,7 +4,7 @@ Pydantic models for the flow-based prediction endpoints.
 Sits alongside :mod:`api.models.schemas`, which describes *log events*. The two
 ontologies stay apart on purpose: a network flow has 78 CICFlowMeter features
 and the taxonomy ``BENIGN|Botnet|BruteForce|DDoS|DoS|Scan|WebAttack``, while an
-event has 25 features and the taxonomy ``normal|brute_force|…``. Merging them
+event has 17 features and the taxonomy ``normal|brute_force|…``. Merging them
 would give one endpoint that accepts payloads no model can score.
 
 The wire shape puts every model input inside a ``features`` object and every

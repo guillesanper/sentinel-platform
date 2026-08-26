@@ -1,11 +1,11 @@
 {
-  "timestamp": "2026-08-11T11:47:17.342665Z",
+  "timestamp": "2026-08-11T12:28:31.747831Z",
   "data": {
     "source": "synthetic",
-    "n_samples": 666,
-    "train_size": 478,
-    "val_size": 54,
-    "test_size": 134
+    "n_samples": 60000,
+    "train_size": 43200,
+    "val_size": 4800,
+    "test_size": 12000
   },
   "parameters": {
     "contamination": 0.2,
@@ -16,97 +16,106 @@
   },
   "threshold": {
     "strategy": "fbeta",
-    "value": -0.014134595025130701,
+    "value": 0.044017960595812096,
     "target_recall": null,
     "beta": 2.0,
     "operating_point": {
-      "threshold": -0.014134595025130701,
+      "threshold": 0.044017960595812096,
       "beta": 2.0,
-      "f2_score": 0.892857,
-      "precision": 0.833333,
-      "recall": 0.909091,
-      "fpr": 0.046512,
-      "fnr": 0.090909,
-      "tp": 10,
-      "fp": 2,
-      "tn": 41,
-      "fn": 1
+      "f2_score": 0.70326,
+      "precision": 0.42108,
+      "recall": 0.844792,
+      "fpr": 0.290365,
+      "fnr": 0.155208,
+      "tp": 811,
+      "fp": 1115,
+      "tn": 2725,
+      "fn": 149
     }
   },
   "metrics": {
     "anomaly": {
-      "accuracy": 0.9253731343283582,
-      "precision": 0.9047619047619048,
-      "recall": 0.7037037037037037,
-      "f1": 0.7916666666666666
+      "accuracy": 0.7365,
+      "precision": 0.4223399918467183,
+      "recall": 0.8633333333333333,
+      "f1": 0.5672050369559266
     },
     "classifier": {
-      "accuracy": 0.9925373134328358,
-      "precision": 0.9940298507462686,
-      "recall": 0.9925373134328358,
-      "f1": 0.9925373134328358,
+      "accuracy": 0.9363333333333334,
+      "precision": 0.9575846337922845,
+      "recall": 0.9363333333333334,
+      "f1": 0.9421853176979849,
       "classification_report": {
         "normal": {
-          "precision": 1.0,
-          "recall": 1.0,
-          "f1-score": 1.0,
-          "support": 107.0
+          "precision": 0.9998883055958896,
+          "recall": 0.9325,
+          "f1-score": 0.9650191343717998,
+          "support": 9600.0
         },
         "brute_force": {
-          "precision": 1.0,
-          "recall": 1.0,
-          "f1-score": 1.0,
-          "support": 5.0
+          "precision": 0.625886524822695,
+          "recall": 0.8825,
+          "f1-score": 0.7323651452282157,
+          "support": 400.0
         },
         "credential_stuffing": {
-          "precision": 1.0,
-          "recall": 1.0,
-          "f1-score": 1.0,
-          "support": 4.0
+          "precision": 0.8759894459102903,
+          "recall": 0.83,
+          "f1-score": 0.8523748395378691,
+          "support": 400.0
         },
         "privilege_escalation": {
-          "precision": 0.8,
+          "precision": 0.5847953216374269,
           "recall": 1.0,
-          "f1-score": 0.8888888888888888,
-          "support": 4.0
+          "f1-score": 0.7380073800738007,
+          "support": 400.0
         },
         "lateral_movement": {
           "precision": 1.0,
           "recall": 1.0,
           "f1-score": 1.0,
-          "support": 5.0
+          "support": 400.0
         },
         "data_exfiltration": {
           "precision": 1.0,
           "recall": 1.0,
           "f1-score": 1.0,
-          "support": 4.0
+          "support": 400.0
         },
         "reconnaissance": {
-          "precision": 1.0,
-          "recall": 0.8,
-          "f1-score": 0.8888888888888888,
-          "support": 5.0
+          "precision": 0.6435483870967742,
+          "recall": 0.9975,
+          "f1-score": 0.7823529411764706,
+          "support": 400.0
         },
-        "accuracy": 0.9925373134328358,
+        "accuracy": 0.9363333333333334,
         "macro avg": {
-          "precision": 0.9714285714285714,
-          "recall": 0.9714285714285714,
-          "f1-score": 0.9682539682539684,
-          "support": 134.0
+          "precision": 0.8185868550090108,
+          "recall": 0.9489285714285715,
+          "f1-score": 0.8671599200554508,
+          "support": 12000.0
         },
         "weighted avg": {
-          "precision": 0.9940298507462686,
-          "recall": 0.9925373134328358,
-          "f1-score": 0.9925373134328358,
-          "support": 134.0
+          "precision": 0.9575846337922845,
+          "recall": 0.9363333333333334,
+          "f1-score": 0.9421853176979849,
+          "support": 12000.0
         }
       },
       "confusion_matrix": [
         [
-          107,
+          8952,
+          143,
+          0,
+          284,
           0,
           0,
+          221
+        ],
+        [
+          0,
+          353,
+          47,
           0,
           0,
           0,
@@ -114,27 +123,9 @@
         ],
         [
           0,
-          5,
+          68,
+          332,
           0,
-          0,
-          0,
-          0,
-          0
-        ],
-        [
-          0,
-          0,
-          4,
-          0,
-          0,
-          0,
-          0
-        ],
-        [
-          0,
-          0,
-          0,
-          4,
           0,
           0,
           0
@@ -143,8 +134,17 @@
           0,
           0,
           0,
+          400,
           0,
-          5,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          400,
           0,
           0
         ],
@@ -154,62 +154,62 @@
           0,
           0,
           0,
-          4,
+          400,
           0
         ],
         [
-          0,
-          0,
-          0,
           1,
           0,
           0,
-          4
+          0,
+          0,
+          0,
+          399
         ]
       ]
     },
     "per_attack_type": {
       "normal": {
-        "precision": 1.0,
-        "recall": 1.0,
-        "f1": 1.0,
-        "support": 107.0
+        "precision": 0.9998883055958896,
+        "recall": 0.9325,
+        "f1": 0.9650191343717998,
+        "support": 9600.0
       },
       "brute_force": {
-        "precision": 1.0,
-        "recall": 1.0,
-        "f1": 1.0,
-        "support": 5.0
+        "precision": 0.625886524822695,
+        "recall": 0.8825,
+        "f1": 0.7323651452282157,
+        "support": 400.0
       },
       "credential_stuffing": {
-        "precision": 1.0,
-        "recall": 1.0,
-        "f1": 1.0,
-        "support": 4.0
+        "precision": 0.8759894459102903,
+        "recall": 0.83,
+        "f1": 0.8523748395378691,
+        "support": 400.0
       },
       "privilege_escalation": {
-        "precision": 0.8,
+        "precision": 0.5847953216374269,
         "recall": 1.0,
-        "f1": 0.8888888888888888,
-        "support": 4.0
+        "f1": 0.7380073800738007,
+        "support": 400.0
       },
       "lateral_movement": {
         "precision": 1.0,
         "recall": 1.0,
         "f1": 1.0,
-        "support": 5.0
+        "support": 400.0
       },
       "data_exfiltration": {
         "precision": 1.0,
         "recall": 1.0,
         "f1": 1.0,
-        "support": 4.0
+        "support": 400.0
       },
       "reconnaissance": {
-        "precision": 1.0,
-        "recall": 0.8,
-        "f1": 0.8888888888888888,
-        "support": 5.0
+        "precision": 0.6435483870967742,
+        "recall": 0.9975,
+        "f1": 0.7823529411764706,
+        "support": 400.0
       }
     }
   },

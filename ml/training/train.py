@@ -38,7 +38,7 @@ from sklearn.model_selection import train_test_split
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from ml.features.pipeline import CombinedFeatureExtractor, FeatureExtractor  # noqa: E402
+from ml.features.pipeline import FeatureExtractor  # noqa: E402
 from ml.models.anomaly_detector import NORMAL_LABEL, AnomalyDetector  # noqa: E402
 from ml.models.classifier import ATTACK_TYPES, LABEL_TO_IDX, AttackClassifier  # noqa: E402
 
@@ -259,66 +259,31 @@ def load_kaggle_csv(
     return X, y, labels
 
 
-def load_or_generate_data_with_campaigns(
-    n_samples: int = 10000,
-    attack_ratio: float = 0.3,
-    seed: int = 42,
-) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    """
-    Generate synthetic data with campaigns and extract combined features.
-
-    Uses CombinedFeatureExtractor (17 event + 8 window = 25 features) to
-    properly capture attack patterns that differ by user cardinality:
-    - brute_force: same user, same IP
-    - credential_stuffing: multiple users, same IP
-
-    Args:
-        n_samples: Approximate number of events to generate.
-        attack_ratio: Ratio of attack campaigns.
-        seed: Random seed for reproducibility.
-
-    Returns:
-        Tuple of (X, y, labels) where:
-        - X: Feature matrix of shape (n_campaigns, 25)
-        - y: Encoded labels of shape (n_campaigns,)
-        - labels: String labels list (one per campaign)
-    """
-    from data.generators.synthetic import SyntheticEventGenerator
-
-    logger.info(
-        "generating_campaign_data",
-        n_samples=n_samples,
-        attack_ratio=attack_ratio,
-        seed=seed,
-    )
-
-    generator = SyntheticEventGenerator(seed=seed)
-    event_groups, labels, campaign_ids = generator.generate_dataset_with_campaigns(
-        n_samples=n_samples,
-        attack_ratio=attack_ratio,
-    )
-
-    logger.info(
-        "campaigns_generated",
-        n_campaigns=len(event_groups),
-        total_events=sum(len(g) for g in event_groups),
-    )
-
-    # Extract combined features (17 event + 8 window = 25 total)
-    extractor = CombinedFeatureExtractor()
-    X = extractor.transform_batch_groups(event_groups)
-
-    # Encode labels
-    y = np.array([LABEL_TO_IDX.get(label, 0) for label in labels], dtype=np.int32)
-
-    logger.info(
-        "campaign_features_extracted",
-        X_shape=X.shape,
-        y_shape=y.shape,
-        n_features=X.shape[1],
-    )
-
-    return X, y, labels
+# `load_or_generate_data_with_campaigns` used to sit here, behind a
+# `--use-window-features/--no-window-features` flag that defaulted to *on*. It
+# built campaigns with `CombinedFeatureExtractor` (17 event + 8 window = 25
+# features) so that brute_force and credential_stuffing — which differ only in
+# user cardinality across a group of events — could be told apart.
+#
+# It is gone because the models it produced could not be served. `api/main.py`
+# instantiates `FeatureExtractor()`, which emits 17 features from a *single*
+# event, so every request against a 25-feature artifact died inside the model
+# with `X has 17 features, but IsolationForest is expecting 25` — a 500 on
+# `/v1/predict`, while `/ready` still reported `ready` because it only checks
+# `is_loaded`, never the arity. The default path of the documented training
+# command produced unservable models.
+#
+# Making the API use `CombinedFeatureExtractor` instead would have closed the
+# arity gap and reopened a worse one. Its `transform()` fills the 8 window
+# columns with *defaults* for a lone event, so a model trained on real campaign
+# windows would be served constants in those columns: no error, no warning, and
+# the campaign-level scores (brute_force F1 1.00) do not transfer to that path
+# at all. Serving 17 honest features beats serving 25 where 8 are placeholders.
+#
+# The window extractors themselves are untouched and still tested — see
+# `ml/features/window_features.py` and `CombinedFeatureExtractor`. Rewiring them
+# needs the API to carry per-source_ip window state across requests, which is a
+# feature, not a flag.
 
 
 # ============================================================================
@@ -862,12 +827,7 @@ def log_to_mlflow(
     is_flag=True,
     help="Enable verbose output.",
 )
-@click.option(
-    "--use-window-features/--no-window-features",
-    default=True,
-    help="Use window features (25 total) for better brute_force vs credential_stuffing distinction.",
-)
-def main(  # noqa: PLR0912, PLR0915
+def main(  # noqa: PLR0915
     data_path: str | None,
     csv_path: str | None,
     binary: bool,
@@ -888,7 +848,6 @@ def main(  # noqa: PLR0912, PLR0915
     seed: int,
     mlflow: bool,
     verbose: bool,
-    use_window_features: bool,
 ) -> None:
     """
     Train Sentinel ML models for intrusion detection.
@@ -928,7 +887,6 @@ def main(  # noqa: PLR0912, PLR0915
         output_dir=output_dir,
         n_samples=n_samples,
         attack_ratio=attack_ratio,
-        use_window_features=use_window_features,
     )
 
     # Create output directory
@@ -942,18 +900,11 @@ def main(  # noqa: PLR0912, PLR0915
     if csv_path is not None:
         # Load directly from Kaggle CSV (bypasses FeatureExtractor)
         X, y, labels = load_kaggle_csv(csv_path, binary=binary)
-    elif use_window_features and data_path is None:
-        # Generate synthetic data with campaigns for window features (25 features)
-        print("\n" + "=" * 60)
-        print("Using Window Features (25 total: 17 event + 8 window)")
-        print("=" * 60)
-        X, y, labels = load_or_generate_data_with_campaigns(
-            n_samples=n_samples,
-            attack_ratio=attack_ratio,
-            seed=seed,
-        )
     else:
-        # Load from JSON or generate synthetic data (17 features)
+        # Load from JSON or generate synthetic data. 17 features, from the same
+        # `FeatureExtractor` the API instantiates at startup — that identity is
+        # the whole contract of this track and is no longer switchable. See the
+        # note where the campaign path was removed, above.
         X, y, labels = load_or_generate_data(
             data_path=data_path,
             n_samples=n_samples,
