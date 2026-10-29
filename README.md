@@ -4,29 +4,29 @@
 
 > Cloud-Native Intrusion Detection Platform powered by Machine Learning
 
-## 🎯 Overview
+## Overview
 
 **Sentinel** es una plataforma de detección de intrusiones que analiza **dos modalidades de dato en
 paralelo**: eventos de log de infraestructura y flujos de red.
 
 **Track de eventos** — sobre logs de infraestructura en tiempo real:
 
-- 🔐 **Brute Force** - Intentos repetidos de autenticación
-- 🎭 **Credential Stuffing** - Uso de credenciales robadas
-- ⬆️ **Privilege Escalation** - Escalada de privilegios no autorizada
-- 🔀 **Lateral Movement** - Movimiento lateral en la red
-- 📤 **Data Exfiltration** - Exfiltración de datos
-- 🔍 **Reconnaissance** - Actividades de reconocimiento
+- **Brute Force** - Intentos repetidos de autenticación
+- **Credential Stuffing** - Uso de credenciales robadas
+- **Privilege Escalation** - Escalada de privilegios no autorizada
+- **Lateral Movement** - Movimiento lateral en la red
+- **Data Exfiltration** - Exfiltración de datos
+- **Reconnaissance** - Actividades de reconocimiento
 
 **Track de flujos** — sobre flujos de red bidireccionales (features CICFlowMeter, 78 columnas),
 con una cascada Isolation Forest → XGBoost entrenada sobre CICIDS2017:
 
-- 💥 **DoS / DDoS** · 🤖 **Botnet** · 🔓 **BruteForce** · 🔎 **Scan** · 🌐 **WebAttack**
+- **DoS / DDoS** · **Botnet** · **BruteForce** · **Scan** · **WebAttack**
 
 Los dos tracks tienen taxonomías, modelos y endpoints **separados a propósito** — ver
 [docs/ml/](./docs/ml/README.md).
 
-## 📊 Key Results (flow track, CICIDS2017)
+## Key Results (flow track, CICIDS2017)
 
 | Split | F1-macro | Stage 1 recall / FPR |
 |---|---|---|
@@ -38,7 +38,7 @@ the same attack burst land in both train and test. Sentinel evaluates with a tem
 default and publishes both numbers with their provenance — full analysis in
 [docs/ml/README.md](./docs/ml/README.md#resultados).
 
-## 🏗️ Architecture
+## Architecture
 
 ```
                               ┌─────────────────┐
@@ -66,7 +66,7 @@ default and publishes both numbers with their provenance — full analysis in
 └───────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 | Layer | Technology |
 |-------|------------|
@@ -79,7 +79,7 @@ default and publishes both numbers with their provenance — full analysis in
 | **CI/CD** | GitHub Actions |
 | **Security** | Trivy, Semgrep, pip-audit |
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 sentinel-platform/
@@ -103,7 +103,7 @@ sentinel-platform/
 └── tests/                    # Test suites
 ```
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -201,7 +201,7 @@ Los CSV de CICIDS2017 (844 MB) **no se versionan**: se descargan de
 [UNB CIC](https://www.unb.ca/cic/datasets/ids-2017.html), distribución `MachineLearningCSV`.
 Detalles de opciones y resultados en [docs/ml/CICIDS2017-TRACK.md](./docs/ml/CICIDS2017-TRACK.md).
 
-## 📊 API Endpoints
+## API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -283,7 +283,7 @@ curl -X POST http://localhost:8000/v1/predict/flow \
 }
 ```
 
-## 🧪 Testing
+## Testing
 
 ```bash
 # Run all tests
@@ -296,7 +296,7 @@ pytest --cov=api --cov=ml --cov-report=html
 pytest tests/unit -v
 ```
 
-## 🔒 Security
+## Security
 
 - Private GKE cluster (no public node IPs)
 - Workload Identity (no service account keys)
@@ -306,7 +306,7 @@ pytest tests/unit -v
 - SAST with Semgrep
 - Dependency scanning with pip-audit
 
-## 📈 Monitoring
+## Monitoring
 
 Access Grafana dashboards:
 
@@ -315,7 +315,7 @@ kubectl port-forward svc/grafana 3000:3000 -n sentinel-observability
 # Open http://localhost:3000
 ```
 
-## 📖 Documentation
+## Documentation
 
 - [Guia de Deployment](./docs/DEPLOYMENT.md) - Proceso completo de despliegue
 - [Guia de Migracion](./docs/MIGRATION_GUIDE.md) - Migracion desde deploy.sh
@@ -327,10 +327,10 @@ kubectl port-forward svc/grafana 3000:3000 -n sentinel-observability
 
 > Pendientes de escribir: `docs/adr/` (Architecture Decision Records) y `docs/runbooks/`.
 
-## 🤝 Contributing
+## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## 👤 Author
+## Author
 
 Guillermo Sánchez — [GitHub](https://github.com/guillesanper) · [Web](https://guillesanper.github.io)
