@@ -40,30 +40,56 @@ default and publishes both numbers with their provenance — full analysis in
 
 ## Architecture
 
-```
-                              ┌─────────────────┐
-                              │   Cloud Armor   │
-                              │   (WAF/DDoS)    │
-                              └────────┬────────┘
-                                       │
-                              ┌────────▼────────┐
-                              │   Cloud Load    │
-                              │   Balancer      │
-                              └────────┬────────┘
-                                       │
-┌──────────────────────────────────────┼───────────────────────────────────────┐
-│                           GKE PRIVATE CLUSTER                                 │
-│                                                                               │
-│   ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐         │
-│   │    PLATFORM     │    │       ML        │    │  OBSERVABILITY  │         │
-│   │   NAMESPACE     │    │   NAMESPACE     │    │   NAMESPACE     │         │
-│   │                 │    │                 │    │                 │         │
-│   │ • Ingestion     │◄──►│ • Prediction    │    │ • Prometheus    │         │
-│   │ • Features      │    │   API           │    │ • Grafana       │         │
-│   │                 │    │ • Model Server  │    │ • Alertmanager  │         │
-│   └─────────────────┘    └─────────────────┘    └─────────────────┘         │
-│                                                                               │
-└───────────────────────────────────────────────────────────────────────────────┘
+Solid boxes are deployed by the manifests in this repo; dashed ones are defined but not wired up yet.
+
+```mermaid
+flowchart LR
+    client(["Clients<br/>log events · network flows"])
+
+    subgraph gcp["Google Cloud"]
+        armor["Cloud Armor<br/>WAF policy (Terraform)"]
+        sm[("Secret Manager")]
+
+        subgraph gke["GKE private cluster"]
+            subgraph platform["namespace: platform"]
+                api["sentinel-api · FastAPI<br/>Deployment + HPA + PDB"]
+                subgraph events["Event track"]
+                    fe[Feature extractor] --> iforest[Isolation Forest] --> fusion[Fusion layer]
+                    fe --> xgb[XGBoost classifier] --> fusion
+                end
+                subgraph flows["Flow track · CICIDS2017"]
+                    s1["Stage 1<br/>Isolation Forest"] --> s2["Stage 2<br/>XGBoost"]
+                end
+                api --> fe
+                api --> s1
+            end
+
+            subgraph ml["namespace: ml"]
+                train["CronJob sentinel-training<br/>event models"]
+                flowtrain["CronJob sentinel-flow-training<br/>flow cascade"]
+                cicids[("PVC sentinel-cicids-data")]
+                models[("PVC sentinel-models")]
+                cicids --> flowtrain
+                train --> models
+                flowtrain --> models
+            end
+
+            subgraph obs["Observability"]
+                prom[Prometheus] --> grafana[Grafana]
+                prom --> am[Alertmanager]
+            end
+
+            eso["External Secrets Operator"]
+        end
+    end
+
+    client -.-> armor -.->|"Ingress + load balancer pending<br/>(ClusterIP service today)"| api
+    sm --> eso -->|"JWT secret · API key"| api
+    api -- "/metrics" --> prom
+    models -.->|"artifact transfer pending"| api
+
+    classDef todo stroke-dasharray: 5 5
+    class armor todo
 ```
 
 ## Tech Stack
