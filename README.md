@@ -1,7 +1,6 @@
 # Sentinel Platform
 
-[![CI](https://github.com/yourusername/sentinel-platform/actions/workflows/ci.yaml/badge.svg)](https://github.com/yourusername/sentinel-platform/actions/workflows/ci.yaml)
-[![Security](https://github.com/yourusername/sentinel-platform/actions/workflows/security.yaml/badge.svg)](https://github.com/yourusername/sentinel-platform/actions/workflows/security.yaml)
+[![CI](https://github.com/guillesanper/sentinel-platform/actions/workflows/ci.yaml/badge.svg)](https://github.com/guillesanper/sentinel-platform/actions/workflows/ci.yaml)
 
 > Cloud-Native Intrusion Detection Platform powered by Machine Learning
 
@@ -26,6 +25,18 @@ con una cascada Isolation Forest → XGBoost entrenada sobre CICIDS2017:
 
 Los dos tracks tienen taxonomías, modelos y endpoints **separados a propósito** — ver
 [docs/ml/](./docs/ml/README.md).
+
+## 📊 Key Results (flow track, CICIDS2017)
+
+| Split | F1-macro | Stage 1 recall / FPR |
+|---|---|---|
+| Random (row-level) | 0.9166 | 0.976 / 0.625 |
+| **Temporal** (default in this repo) | **0.2809** | 0.626 / 0.034 |
+
+The drop is the size of the leakage that a row-level random split hides: near-duplicate flows from
+the same attack burst land in both train and test. Sentinel evaluates with a temporal split by
+default and publishes both numbers with their provenance — full analysis in
+[docs/ml/README.md](./docs/ml/README.md#resultados).
 
 ## 🏗️ Architecture
 
@@ -108,7 +119,7 @@ docker --version          # Docker
 ### 1. Clone & Setup
 
 ```bash
-git clone https://github.com/yourusername/sentinel-platform.git
+git clone https://github.com/guillesanper/sentinel-platform.git
 cd sentinel-platform
 
 # Create virtual environment
@@ -318,12 +329,8 @@ kubectl port-forward svc/grafana 3000:3000 -n sentinel-observability
 
 ## 🤝 Contributing
 
-1. Fork the repository
-2. Create feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit changes (`git commit -m 'Add amazing feature'`)
-4. Push to branch (`git push origin feature/amazing-feature`)
-5. Open Pull Request
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## 📄 License
+## 👤 Author
 
-MIT License - see [LICENSE](LICENSE) for details.
+Guillermo Sánchez — [GitHub](https://github.com/guillesanper) · [Web](https://guillesanper.github.io)

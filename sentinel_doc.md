@@ -2172,7 +2172,7 @@ docker --version         # Docker
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/yourusername/sentinel-platform.git
+git clone https://github.com/guillesanper/sentinel-platform.git
 cd sentinel-platform
 
 # 2. Authenticate to GCP
