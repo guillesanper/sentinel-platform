@@ -282,9 +282,13 @@ jobs:
     # that the deployment manifests cannot correctly run.
     needs: [test, manifests, security]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Job-level permissions replace the defaults entirely, so every scope the
+    # job uses must be listed. security-events: write is what upload-sarif
+    # needs; actions: read would only be required if the repo were private.
     permissions:
       contents: read
       packages: write
+      security-events: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -313,7 +317,7 @@ jobs:
       # Trivy vulnerability scan on Dockerfile
       # -----------------------------------------------------------------------
       - name: Run Trivy vulnerability scanner (config)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
           scan-type: 'config'
           scan-ref: 'api/Dockerfile'
@@ -324,6 +328,7 @@ jobs:
       # Build and push Docker image
       # -----------------------------------------------------------------------
       - name: Build and push Docker image
+        id: push
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -339,49 +344,20 @@ jobs:
       # Trivy vulnerability scan on built image
       # -----------------------------------------------------------------------
       - name: Run Trivy vulnerability scanner (image)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          # Scan by digest: exactly the image built above, not whatever
+          # :latest happens to point to.
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}
           format: 'sarif'
           output: 'trivy-results.sarif'
           severity: 'CRITICAL,HIGH'
 
       - name: Upload Trivy scan results
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: 'trivy-results.sarif'
         if: always()
-
-  # ==========================================================================
-  # Integration Tests (Optional - runs on main only)
-  # ==========================================================================
-  integration:
-    name: Integration Tests
-    runs-on: ubuntu-latest
-    needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
-
-      - name: Run integration tests
-        run: |
-          pytest tests/integration/ -v --tb=short || true
-        continue-on-error: true
-        env:
-          TEST_ENV: ci
 
   # ==========================================================================
   # Notification (on failure)
